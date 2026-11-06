@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/format"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -114,6 +115,9 @@ func allowedDevelopmentPath(path string, write bool) error {
 		return errors.New("不是允许的源码路径")
 	}
 	allowed := strings.HasPrefix(path, "server/internal/") || strings.HasPrefix(path, "web/src/") || strings.HasPrefix(path, "fde/spec/") || strings.HasPrefix(path, "fde/assets/") || (!write && (path == "README.md" || strings.HasPrefix(path, "docs/") || path == "server/go.mod" || path == "web/package.json" || path == "server/main.go" || strings.HasPrefix(path, "fde/requirements/")))
+	if write {
+		allowed = strings.HasPrefix(path, "server/internal/model/") || strings.HasPrefix(path, "server/internal/service/") || strings.HasPrefix(path, "server/internal/api/") || strings.HasPrefix(path, "server/internal/router/") || strings.HasPrefix(path, "web/src/api/") || strings.HasPrefix(path, "web/src/views/generated/") || strings.HasPrefix(path, "web/src/components/business/") || strings.HasPrefix(path, "fde/spec/") || strings.HasPrefix(path, "fde/assets/")
+	}
 	ext := filepath.Ext(path)
 	if !allowed || (ext != ".go" && ext != ".ts" && ext != ".vue" && ext != ".css" && ext != ".json" && ext != ".md" && path != "server/go.mod") {
 		return errors.New("任务仅能访问源码和业务规格文件")
@@ -210,13 +214,28 @@ func applyDevelopmentChanges(run model.DevRun, changes []developmentChange) (any
 	}
 	old := map[string][]byte{}
 	seen := map[string]bool{}
-	for _, change := range changes {
+	for index, change := range changes {
 		if seen[change.Path] {
 			return nil, errors.New("重复文件路径")
 		}
 		seen[change.Path] = true
 		if err := allowedDevelopmentPath(change.Path, true); err != nil {
 			return nil, err
+		}
+		// P1 may edit files created in this task, never overwrite baseline framework/control code.
+		if run.WorkspaceBaseCommit != "" {
+			baseline := exec.Command("git", "-C", run.WorkspacePath, "cat-file", "-e", run.WorkspaceBaseCommit+":"+change.Path)
+			if baseline.Run() == nil {
+				return nil, fmt.Errorf("任务不能修改项目基线中的控制源码: %s", change.Path)
+			}
+		}
+		if strings.HasSuffix(change.Path, ".go") {
+			formatted, err := format.Source([]byte(change.Content))
+			if err != nil {
+				return nil, fmt.Errorf("Go语法不合法 %s: %w", change.Path, err)
+			}
+			changes[index].Content = string(formatted)
+			change = changes[index]
 		}
 		if len(change.Content) > 2<<20 {
 			return nil, errors.New("文件内容过大")
@@ -309,6 +328,12 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 			req.Fields = append(req.Fields, codegen.GenField{Name: field.Name, Title: field.Title, Type: field.Type, Search: field.Searchable, InList: field.InList, InForm: field.InForm, Required: field.Required, Rules: rules})
 		}
 	}
+	if req.ObjectKey == "" {
+		req.ObjectKey = req.TableName
+	}
+	if !strings.HasPrefix(req.TableName, "biz_") || !strings.HasPrefix(req.ObjectKey, "biz_") {
+		return nil, errors.New("受管理业务对象和数据表必须使用biz_命名空间")
+	}
 	d, err := codegen.Prepare(req)
 	if err != nil {
 		return nil, err
@@ -400,7 +425,7 @@ func RunDevelopmentChecks(ctx context.Context, run model.DevRun) (any, error) {
 		}
 	}
 	output := filepath.Join(filepath.Dir(run.WorkspacePath), "checks", run.Key)
-	report, err := runner.Check(ctx, runner.Request{Workspace: run.WorkspacePath, OutputDir: output, Profile: runner.Profile, ExpectedSnapshotHash: hash, GOARCH: "arm64"})
+	report, err := runner.Check(ctx, runner.Request{Workspace: run.WorkspacePath, OutputDir: output, Profile: runner.Profile, ExpectedSnapshotHash: hash, GOARCH: global.Config.Development.TargetArch})
 	if err == nil && report.Success {
 		developmentVerifiedChecks.Store(run.ID, report)
 	}

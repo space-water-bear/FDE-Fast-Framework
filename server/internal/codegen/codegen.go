@@ -100,6 +100,9 @@ type FieldData struct {
 
 // Prepare 校验请求并推导模板渲染数据
 func Prepare(req GenRequest) (*Data, error) {
+	if req.ObjectKey != "" && !nameRe.MatchString(req.ObjectKey) {
+		return nil, errors.New("业务对象键不合法")
+	}
 	if !nameRe.MatchString(req.TableName) {
 		return nil, errors.New("表名不合法: 仅支持小写字母/数字/下划线且以字母开头")
 	}

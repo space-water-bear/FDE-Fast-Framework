@@ -177,7 +177,7 @@ func claimNextDevelopmentRun() (*model.DevRun, error) {
 }
 
 func executeDevelopmentRun(parent context.Context, run model.DevRun, services developmentRunServices) (terminalErr error) {
-	ctx, cancel := context.WithTimeout(parent, 15*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, 30*time.Minute)
 	defer cancel()
 	developmentWorkerControl.Lock()
 	developmentWorkerControl.active[run.ID] = cancel

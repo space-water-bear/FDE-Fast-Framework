@@ -9,12 +9,10 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"syscall"
 	"time"
 
 	"fde-admin/internal/config"
-	"fde-admin/internal/delivery"
 	"fde-admin/internal/initialize"
 	"fde-admin/internal/router"
 	"fde-admin/internal/service"
@@ -28,8 +26,8 @@ func main() {
 }
 func run() error {
 	args := os.Args[1:]
-	command := "serve"
-	if len(args) > 0 && (args[0] == "bootstrap" || args[0] == "verify" || args[0] == "serve") {
+	command := "workbench"
+	if len(args) > 0 && (args[0] == "bootstrap" || args[0] == "verify" || args[0] == "serve" || args[0] == "workbench") {
 		command = args[0]
 		args = args[1:]
 	}
@@ -41,21 +39,15 @@ func run() error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unknown server command or positional argument: %s", flags.Arg(0))
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		return err
 	}
 	cfg.Runtime.ManifestPath = *manifest
 	cfg.Runtime.WebDir = *web
-	if *manifest != "" {
-		pkg, err := delivery.Inspect(filepath.Dir(*manifest))
-		if err != nil {
-			return err
-		}
-		cfg.App.Mode = "release"
-		cfg.Runtime.ReleaseID = pkg.ID
-		cfg.Runtime.SourceHash = pkg.Manifest.SourceHash
-	}
 	switch command {
 	case "bootstrap":
 		if *assets == "" {
@@ -73,11 +65,15 @@ func run() error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if cfg.App.Mode == "release" {
+	if command == "serve" {
+		cfg.App.Mode = "release"
 		if err := initialize.VerifyRuntime(cfg, *manifest); err != nil {
 			return err
 		}
 	} else {
+		if cfg.App.Mode == "release" || *manifest != "" {
+			return fmt.Errorf("workbench仅用于开发；运行交付产物请显式使用serve --manifest")
+		}
 		initialize.Run(cfg)
 		if err := service.StartDevelopmentWorker(ctx); err != nil {
 			return err

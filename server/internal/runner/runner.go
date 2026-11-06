@@ -198,6 +198,10 @@ func (r *Runner) Check(ctx context.Context, req Request) (report Report, retErr 
 		report.Steps = append(report.Steps, Step{Name: step.name, ExitCode: result.ExitCode, LogPath: logPath, Truncated: result.Truncated, DurationMS: time.Since(started).Milliseconds()})
 		if execErr != nil || result.ExitCode != 0 || (step.version != "" && !strings.Contains(strings.TrimSpace(result.Output), step.version)) || (step.name == "go-format" && strings.TrimSpace(result.Output) != "") {
 			report.FailedStep = step.name
+			report.Diagnostic = result.Output
+			if len(report.Diagnostic) > 16000 {
+				report.Diagnostic = report.Diagnostic[:16000]
+			}
 			if execErr != nil {
 				return report, execErr
 			}

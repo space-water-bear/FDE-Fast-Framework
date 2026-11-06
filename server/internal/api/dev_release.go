@@ -52,7 +52,7 @@ func ListDevelopmentTargets(c *gin.Context) {
 	if _, ok := engineeringRequestScope(c); !ok {
 		return
 	}
-	utils.OK(c, gin.H{"list": []gin.H{{"id": "local-linux", "name": "本机隔离 Linux 首次安装测试环境", "kind": "docker-first-install"}}})
+	utils.OK(c, gin.H{"list": []gin.H{{"id": "local-linux", "name": "本机隔离 Linux 首次安装测试环境（" + global.Config.Development.TargetArch + "）", "kind": "docker-first-install"}}})
 }
 func PreviewDevelopmentRelease(c *gin.Context) {
 	scope, ok := engineeringRequestScope(c)

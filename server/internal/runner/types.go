@@ -49,6 +49,7 @@ type Report struct {
 	Success      bool              `json:"success"`
 	FailedStep   string            `json:"failedStep,omitempty"`
 	Error        string            `json:"error,omitempty"`
+	Diagnostic   string            `json:"diagnostic,omitempty"`
 	ReportPath   string            `json:"reportPath"`
 	ArtifactsDir string            `json:"artifactsDir"`
 	Artifacts    map[string]string `json:"artifacts"`

@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
@@ -29,6 +30,7 @@ type Development struct {
 	TemplateRef  string `yaml:"template-ref"`
 	ReleaseDir   string `yaml:"release-dir"`
 	TargetDir    string `yaml:"target-dir"`
+	TargetArch   string `yaml:"target-arch"`
 }
 
 type App struct {
@@ -142,6 +144,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Development.TargetDir == "" {
 		cfg.Development.TargetDir = "./data/test-targets"
+	}
+	if cfg.Development.TargetArch == "" {
+		cfg.Development.TargetArch = runtime.GOARCH
 	}
 	return cfg, nil
 }

@@ -72,6 +72,7 @@ import (
 	"fde-admin/internal/model"
 	"fde-admin/internal/service"
 	"fde-admin/internal/utils"
+[[if .SchemaDriven]]"fde-admin/internal/global"[[end]]
 )
 
 type [[.Snake]]ListQuery struct {
@@ -95,7 +96,7 @@ func List[[.StructName]]s(c *gin.Context) {
 
 func Create[[.StructName]](c *gin.Context) {
 	var m model.[[.StructName]]
-	if err := utils.BindBusinessJSON(c, &m, [[.SchemaLiteral]]); err != nil {
+	if err := utils.BindBusinessJSON(c, &m, [[if .SchemaDriven]]global.GeneratedBusinessSchemaJSON("[[.ObjectKey]]")[[else]][[.SchemaLiteral]][[end]]); err != nil {
 		utils.Fail(c, "参数错误")
 		return
 	}
@@ -113,7 +114,7 @@ func Update[[.StructName]](c *gin.Context) {
 		return
 	}
 	var m model.[[.StructName]]
-	if err := utils.BindBusinessJSON(c, &m, [[.SchemaLiteral]]); err != nil {
+	if err := utils.BindBusinessJSON(c, &m, [[if .SchemaDriven]]global.GeneratedBusinessSchemaJSON("[[.ObjectKey]]")[[else]][[.SchemaLiteral]][[end]]); err != nil {
 		utils.Fail(c, "参数错误")
 		return
 	}
@@ -144,10 +145,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"fde-admin/internal/api"
+[[if .SchemaDriven]]"fde-admin/internal/global"[[end]]
 )
 
 func init() {
 	RegisterGenerated(register[[.StructName]])
+[[if .SchemaDriven]]global.RegisterGeneratedBusiness(global.BusinessRegistration{ObjectKey:"[[.ObjectKey]]",TableName:"[[.TableName]]",Path:"[[.Snake]]",Name:"[[.StructName]]",Component:"generated/[[.Snake]]/index",SchemaJSON:[[.SchemaLiteral]]})[[end]]
 }
 
 func register[[.StructName]](g *gin.RouterGroup) {
