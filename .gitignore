@@ -1,0 +1,24 @@
+server/data/
+server/fde-admin
+web/node_modules/
+web/dist/
+*.log
+.DS_Store
+
+# appended by dispatcher (git init)
+server/log/
+server/uploads/
+.fde-gen-backup/
+/server/fde-admin
+
+# Local build artifacts and package cache
+server/bin/
+.pnpm-store/
+
+# Local environment overrides
+.env
+.env.*
+!.env.example
+
+# Original local screenshot contains unmasked demonstration contacts
+docs/screenshots/table-page-demo.png

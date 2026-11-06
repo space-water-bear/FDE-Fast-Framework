@@ -1,0 +1,32 @@
+app:
+  name: FDE-Fast-Framework
+  port: 8080
+  mode: debug              # debug | release
+db:
+  driver: sqlite           # sqlite | postgres
+  dsn: ./data/app.db       # sqlite: 文件路径; postgres: host=127.0.0.1 user=postgres password=123456 dbname=fde_admin port=5432 sslmode=disable TimeZone=Asia/Shanghai
+jwt:
+  secret: fde-admin-secret-change-me
+  access-expires-hours: 2        # 访问令牌有效期(小时)
+  refresh-expires-hours: 168     # 刷新令牌有效期(小时, 每次刷新自动轮换)
+  issuer: fde-admin
+  use-multipoint: true      # true=允许多设备在线; false=单点登录(新登录踢掉旧设备)
+seed:
+  enabled: true            # 首次启动自动建表并写入种子数据(admin账号/角色/菜单)
+  admin-username: admin
+  admin-password: "123456"
+codegen:
+  server-dir: .            # 代码生成器后端输出目录(相对 server 运行目录)
+  web-dir: ../web          # 代码生成器前端输出目录
+captcha:
+  enabled: true            # 登录验证码开关(可被环境变量 FDE_CAPTCHA_ENABLED 覆盖)
+  expire-minutes: 5        # 验证码有效期(分钟)
+upload:
+  dir: ./uploads           # 上传文件存储目录(相对 server 运行目录)
+  max-size-mb: 10          # 单文件大小上限(MB)
+zap:
+  level: info              # debug | info | warn | error
+  director: ./log          # 日志文件目录(留空仅输出控制台)
+  log-in-console: true
+mcp:
+  api-key: ""              # MCP 网关调用 /api/mcp/* 的 API Key(留空禁用; 环境变量 FDE_MCP_API_KEY 覆盖)
