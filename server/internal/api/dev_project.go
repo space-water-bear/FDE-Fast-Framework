@@ -1,6 +1,9 @@
 package api
 
 import (
+	"encoding/json"
+	"fde-admin/internal/global"
+	"fde-admin/internal/model"
 	"fde-admin/internal/service"
 	"fde-admin/internal/utils"
 	"github.com/gin-gonic/gin"
@@ -47,12 +50,13 @@ func CreateDevRun(c *gin.Context) {
 	}
 	var in struct {
 		Requirement string `json:"requirement"`
+		AgentID     uint   `json:"agentId"`
 	}
 	if c.ShouldBindJSON(&in) != nil {
 		utils.Fail(c, "参数错误")
 		return
 	}
-	run, err := service.CreateDevRun(c.Request.Context(), scope, in.Requirement)
+	run, err := service.CreateDevRun(c.Request.Context(), scope, in.Requirement, in.AgentID)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -70,7 +74,15 @@ func GetDevRun(c *gin.Context) {
 		utils.Forbidden(c, err.Error())
 		return
 	}
-	utils.OK(c, gin.H{"run": run, "events": events})
+	var checks, result any
+	_ = json.Unmarshal([]byte(run.CheckResult), &checks)
+	_ = json.Unmarshal([]byte(run.Result), &result)
+	data := gin.H{"run": run, "events": events, "checks": checks, "result": result}
+	var release model.DevRelease
+	if global.DB.Where("run_id = ?", run.ID).Order("id desc").First(&release).Error == nil {
+		data["release"] = developmentReleaseDTO(release)
+	}
+	utils.OK(c, data)
 }
 
 func CancelDevRun(c *gin.Context) {
@@ -83,4 +95,18 @@ func CancelDevRun(c *gin.Context) {
 		return
 	}
 	utils.OK(c, nil)
+}
+
+func ListDevRuns(c *gin.Context) {
+	scope, ok := engineeringRequestScope(c)
+	if !ok {
+		return
+	}
+	page, size := utils.ParsePagination(c)
+	runs, total, err := service.ListDevRuns(scope, page, size)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	utils.OK(c, gin.H{"list": runs, "total": total})
 }

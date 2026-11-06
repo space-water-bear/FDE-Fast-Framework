@@ -84,22 +84,30 @@ func Run(cfg *config.Config) {
 	}
 }
 
-func initDB(cfg *config.Config) error {
+func openDatabase(cfg *config.Config) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.DB.Driver {
 	case "sqlite":
 		if dir := filepath.Dir(cfg.DB.DSN); dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		dialector = sqlite.Open(cfg.DB.DSN)
 	case "postgres":
 		dialector = postgres.Open(cfg.DB.DSN)
 	default:
-		return fmt.Errorf("不支持的数据库驱动: %s (仅支持 sqlite / postgres)", cfg.DB.Driver)
+		return nil, fmt.Errorf("不支持的数据库驱动: %s (仅支持 sqlite / postgres)", cfg.DB.Driver)
 	}
 	db, err := gorm.Open(dialector, &gorm.Config{Logger: logger.Default.LogMode(logger.Warn)})
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func initDB(cfg *config.Config) error {
+	db, err := openDatabase(cfg)
 	if err != nil {
 		return err
 	}
@@ -110,7 +118,7 @@ func initDB(cfg *config.Config) error {
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{}, &model.AiUsage{},
 		&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{},
-		&model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{},
+		&model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{}, &model.DevRelease{}, &model.DevDeployment{},
 	}, model.RegistryTables()...)
 	if err := db.AutoMigrate(models...); err != nil {
 		return err

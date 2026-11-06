@@ -18,12 +18,17 @@ type Config struct {
 	Zap         Zap         `yaml:"zap"`
 	MCP         MCP         `yaml:"mcp"`
 	Development Development `yaml:"development"`
+	Runtime     Runtime     `yaml:"-"`
 }
+
+type Runtime struct{ ManifestPath, WebDir, ReleaseID, SourceHash string }
 
 type Development struct {
 	WorkspaceDir string `yaml:"workspace-dir"`
 	TemplateRepo string `yaml:"template-repo"`
 	TemplateRef  string `yaml:"template-ref"`
+	ReleaseDir   string `yaml:"release-dir"`
+	TargetDir    string `yaml:"target-dir"`
 }
 
 type App struct {
@@ -131,6 +136,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Development.TemplateRef == "" {
 		cfg.Development.TemplateRef = "HEAD"
+	}
+	if cfg.Development.ReleaseDir == "" {
+		cfg.Development.ReleaseDir = "./data/releases"
+	}
+	if cfg.Development.TargetDir == "" {
+		cfg.Development.TargetDir = "./data/test-targets"
 	}
 	return cfg, nil
 }

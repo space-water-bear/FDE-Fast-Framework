@@ -61,7 +61,15 @@ func TestCustomerProjectExportAndDurableQueuedRun(t *testing.T) {
 		t.Fatalf("invalid project: %+v", project)
 	}
 	newScope := EngineeringScope{ActorID: owner.ActorID, ProjectID: project.ID}
-	run, err := CreateDevRun(context.Background(), newScope, "新增维修登记")
+	provider := model.AiProvider{Name: "run-test-provider", APIKey: "test-key", Model: "test-model", Enabled: true, APIMode: "chat"}
+	if err := global.DB.Create(&provider).Error; err != nil {
+		t.Fatal(err)
+	}
+	selectedAgent := model.AiAgent{Name: "run-test-agent", ProviderID: provider.ID, Enabled: true}
+	if err := global.DB.Create(&selectedAgent).Error; err != nil {
+		t.Fatal(err)
+	}
+	run, err := CreateDevRun(context.Background(), newScope, "新增维修登记", selectedAgent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

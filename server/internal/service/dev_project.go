@@ -83,9 +83,19 @@ func CreateDevProject(ctx context.Context, actorID uint, key, name string) (*mod
 	return project, nil
 }
 
-func CreateDevRun(ctx context.Context, scope EngineeringScope, requirement string) (*model.DevRun, error) {
+func CreateDevRun(ctx context.Context, scope EngineeringScope, requirement string, agentIDs ...uint) (*model.DevRun, error) {
 	project, err := EngineeringProject(scope)
 	if err != nil {
+		return nil, err
+	}
+	if len(agentIDs) != 1 || agentIDs[0] == 0 {
+		return nil, errors.New("请选择执行开发任务的智能体")
+	}
+	var selectedAgent model.AiAgent
+	if err := global.DB.First(&selectedAgent, agentIDs[0]).Error; err != nil || !selectedAgent.Enabled {
+		return nil, errors.New("开发智能体不存在或已禁用")
+	}
+	if _, err := loadProvider(&selectedAgent); err != nil {
 		return nil, err
 	}
 	requirement = strings.TrimSpace(requirement)
@@ -99,7 +109,7 @@ func CreateDevRun(ctx context.Context, scope EngineeringScope, requirement strin
 	if err != nil {
 		return nil, errors.New("项目源码基线不可用")
 	}
-	run := &model.DevRun{Key: uuid.NewString(), ProjectID: scope.ProjectID, ActorID: scope.ActorID, Requirement: requirement, BaseCommit: strings.TrimSpace(string(base)), State: "queued", Phase: "plan"}
+	run := &model.DevRun{Key: uuid.NewString(), ProjectID: scope.ProjectID, ActorID: scope.ActorID, AgentID: selectedAgent.ID, Requirement: requirement, BaseCommit: strings.TrimSpace(string(base)), State: "queued", Phase: "plan"}
 	err = global.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Create(run).Error; err != nil {
 			return err
@@ -122,19 +132,66 @@ func GetDevRun(scope EngineeringScope, key string) (*model.DevRun, []model.DevRu
 	return &run, events, err
 }
 
+func ListDevRuns(scope EngineeringScope, page, pageSize int) ([]model.DevRun, int64, error) {
+	if _, err := EngineeringProject(scope); err != nil {
+		return nil, 0, err
+	}
+	if page < 1 {
+		page = 1
+	}
+	if pageSize < 1 {
+		pageSize = 20
+	}
+	if pageSize > 100 {
+		pageSize = 100
+	}
+	query := global.DB.Model(&model.DevRun{}).Where("project_id = ? AND actor_id = ?", scope.ProjectID, scope.ActorID)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var list []model.DevRun
+	if err := query.Order("id desc").Offset((page - 1) * pageSize).Limit(pageSize).Find(&list).Error; err != nil {
+		return nil, 0, err
+	}
+	return list, total, nil
+}
+
 func CancelDevRun(scope EngineeringScope, key string) error {
 	run, _, err := GetDevRun(scope, key)
 	if err != nil {
 		return err
 	}
-	return global.DB.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.DevRun{}).Where("id = ? AND state = ?", run.ID, "queued").Update("state", "canceled")
+	if run.State == "canceled" {
+		return errors.New("任务已取消，无需重复操作")
+	}
+	if run.State == "running" && run.CancelRequested {
+		cancelActiveDevelopmentRun(run.ID)
+		return nil
+	}
+	err = global.DB.Transaction(func(tx *gorm.DB) error {
+		now := time.Now().UTC()
+		changes := map[string]any{"cancel_requested": true}
+		kind, message := "cancel_requested", "用户请求停止开发任务"
+		switch run.State {
+		case "queued":
+			changes["state"], changes["finished_at"] = "canceled", now
+			kind, message = "canceled", "用户取消排队中的开发任务"
+		case "running":
+		default:
+			return errors.New("此任务已结束，不能取消")
+		}
+		result := tx.Model(&model.DevRun{}).Where("id = ? AND state = ?", run.ID, run.State).Updates(changes)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return errors.New("只有排队中的任务可取消，任务状态已变化")
+			return errors.New("任务状态已变化，请刷新")
 		}
-		return tx.Create(&model.DevRunEvent{RunID: run.ID, Kind: "canceled", Message: "用户取消开发任务"}).Error
+		return tx.Create(&model.DevRunEvent{RunID: run.ID, Kind: kind, Message: message}).Error
 	})
+	if err == nil {
+		cancelActiveDevelopmentRun(run.ID)
+	}
+	return err
 }

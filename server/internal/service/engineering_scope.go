@@ -65,6 +65,9 @@ func authorizeEngineeringTool(ctx context.Context, name, args string) error {
 	if !engineering {
 		return nil
 	}
+	if global.Config != nil && global.Config.App.Mode == "release" {
+		return errors.New("客户运行环境未启用工程工具")
+	}
 	scope, err := RequireEngineeringScope(ctx)
 	if err != nil {
 		return err
