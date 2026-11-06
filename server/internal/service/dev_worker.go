@@ -274,6 +274,10 @@ func executeDevelopmentRun(parent context.Context, run model.DevRun, services de
 		return err
 	}
 	run.WorkspacePath, run.WorkspaceBaseCommit = exported.Path, exported.BaseCommit
+	frozenRequirement := developmentJSON(map[string]any{"runKey": run.Key, "baseCommit": run.BaseCommit, "requirement": run.Requirement})
+	if err := writeRootedFile(run.WorkspacePath, "fde/requirements/"+run.Key+".json", []byte(frozenRequirement)); err != nil {
+		return err
+	}
 	if err := db.Model(&model.DevRun{}).Where("id = ? AND state = ?", run.ID, "running").Updates(map[string]any{"workspace_path": run.WorkspacePath, "workspace_base_commit": run.WorkspaceBaseCommit, "phase": "edit"}).Error; err != nil {
 		return err
 	}

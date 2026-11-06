@@ -205,7 +205,11 @@ func DeployDevelopmentRelease(ctx context.Context, scope EngineeringScope, key, 
 	if err := removeDevelopmentContainer(target, name); err != nil {
 		return fail(err)
 	}
-	args := append([]string{"run", "--detach", "--name", name, "-p", "127.0.0.1::8080"}, common...)
+	hostPort, err := developmentRuntimePort(deployment.URL)
+	if err != nil {
+		return fail(err)
+	}
+	args := append([]string{"run", "--detach", "--name", name, "-p", "127.0.0.1:" + hostPort + ":8080"}, common...)
 	args = append(args, "alpine:3.22", "/release/server", "serve", "--config", "/shared/config.yaml", "--manifest", "/release/manifest.json", "--web", "/release/web")
 	cleanupNeeded = true // A canceled Docker client may have already started the named container.
 	if _, err := developmentDockerCommand(operationCtx, target, args...); err != nil {
@@ -647,4 +651,26 @@ func developmentSchemaVersion(v any) (int64, bool) {
 		return i, err == nil && i > 0
 	}
 	return 0, false
+}
+
+func developmentRuntimePort(previousURL string) (string, error) {
+	if previousURL != "" {
+		parsed, err := url.Parse(previousURL)
+		if err == nil && parsed.Scheme == "http" && parsed.Hostname() == "127.0.0.1" && parsed.User == nil && parsed.Path == "" {
+			port := parsed.Port()
+			number, err := strconv.Atoi(port)
+			if err == nil && number > 0 && number < 65536 {
+				return port, nil
+			}
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return "", err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return "", err
+	}
+	return strconv.Itoa(port), nil
 }

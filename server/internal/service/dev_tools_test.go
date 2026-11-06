@@ -91,3 +91,23 @@ func TestDevelopmentPatchProtectsControlCodeAndSourceBaselines(t *testing.T) {
 		t.Fatal("failed patch mutated file")
 	}
 }
+
+func TestDevelopmentSnapshotDoesNotCountFrozenRequirementAsAgentCode(t *testing.T) {
+	_, _, repo := setupDevelopmentRunTest(t)
+	base, _ := exec.Command("git", "-C", repo, "rev-parse", "HEAD").Output()
+	run := model.DevRun{WorkspacePath: repo, WorkspaceBaseCommit: strings.TrimSpace(string(base))}
+	if err := writeRootedFile(repo, "fde/requirements/task.json", []byte(`{"requirement":"host frozen"}`)); err != nil {
+		t.Fatal(err)
+	}
+	diff, before, err := DevelopmentRunSnapshot(context.Background(), run)
+	if err != nil || diff != "" || before == "" {
+		t.Fatalf("host requirement was treated as completed business code: %q %v", diff, err)
+	}
+	if err := writeRootedFile(repo, "server/internal/service/business.go", []byte("package service\nvar BusinessChanged = true\n")); err != nil {
+		t.Fatal(err)
+	}
+	diff, after, err := DevelopmentRunSnapshot(context.Background(), run)
+	if err != nil || !strings.Contains(diff, "BusinessChanged") || strings.Contains(diff, "host frozen") || after == before {
+		t.Fatalf("business source change was not captured: %q %v", diff, err)
+	}
+}

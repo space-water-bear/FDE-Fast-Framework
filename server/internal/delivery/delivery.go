@@ -123,15 +123,17 @@ func Pack(ctx context.Context, req PackRequest) (Package, error) {
 	if err := writeFile(stage, "assets/business.json", assetBytes, 0o644); err != nil {
 		return Package{}, err
 	}
-	specDir := filepath.Join(req.Workspace, "fde/spec")
-	if st, err := os.Stat(specDir); err == nil && st.IsDir() {
-		specFiles, err := runner.HashTree(specDir)
-		if err != nil {
-			return Package{}, err
-		}
-		for path := range specFiles {
-			if err := copyChecked(specDir, filepath.Join(stage, "spec"), path); err != nil {
+	for _, documentDir := range []string{"spec", "requirements"} {
+		sourceDir := filepath.Join(req.Workspace, "fde", documentDir)
+		if st, err := os.Stat(sourceDir); err == nil && st.IsDir() {
+			files, err := runner.HashTree(sourceDir)
+			if err != nil {
 				return Package{}, err
+			}
+			for path := range files {
+				if err := copyChecked(sourceDir, filepath.Join(stage, documentDir), path); err != nil {
+					return Package{}, err
+				}
 			}
 		}
 	}

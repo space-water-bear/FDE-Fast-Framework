@@ -49,8 +49,9 @@ jobs:
           package-manager-cache: false
       - run: npm install --global pnpm@11.23.0
       - run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
-      - run: pnpm test
-      - run: pnpm build
+      - run: node --test tests/*.test.mjs
+      - run: node node_modules/vue-tsc/bin/vue-tsc.js --noEmit
+      - run: node node_modules/vite/bin/vite.js build
 
   docker-first-delivery:
     if: github.event_name == 'workflow_dispatch' && inputs.docker_acceptance

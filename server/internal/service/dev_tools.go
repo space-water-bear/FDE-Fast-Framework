@@ -390,7 +390,7 @@ func DevelopmentRunSnapshot(ctx context.Context, run model.DevRun) (string, stri
 	if err := cmd.Run(); err != nil {
 		return "", "", err
 	}
-	diff, err := exec.CommandContext(ctx, "git", "-C", run.WorkspacePath, "diff", "--cached", "--no-ext-diff", run.WorkspaceBaseCommit, "--").Output()
+	diff, err := exec.CommandContext(ctx, "git", "-C", run.WorkspacePath, "diff", "--cached", "--no-ext-diff", run.WorkspaceBaseCommit, "--", "server/internal", "web/src", "fde/spec", "fde/assets").Output()
 	if err != nil {
 		return "", "", err
 	}

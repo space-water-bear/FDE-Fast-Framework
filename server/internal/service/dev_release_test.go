@@ -480,3 +480,14 @@ func TestDeployedReleaseReusesHealthyAcceptedTargetWithoutLogin(t *testing.T) {
 		t.Fatal("healthy accepted deployment restarted or reused initialization password")
 	}
 }
+
+func TestDevelopmentRuntimePortRemainsExplicitAcrossRestarts(t *testing.T) {
+	port, err := developmentRuntimePort("")
+	if err != nil || port == "" {
+		t.Fatalf("missing loopback port: %s %v", port, err)
+	}
+	next, err := developmentRuntimePort("http://127.0.0.1:" + port)
+	if err != nil || next != port {
+		t.Fatal("runtime port changed for existing target")
+	}
+}

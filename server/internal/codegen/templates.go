@@ -76,7 +76,7 @@ import (
 )
 
 type [[.Snake]]ListQuery struct {
-[[range .SearchFields]]	[[.FieldName]] [[.GoSearchType]] [[printf "%c" 96]]form:"[[.ColumnName]]"[[printf "%c" 96]]
+[[range .SearchFields]]	[[.FieldName]] [[.GoSearchType]] [[printf "%c" 96]]form:"[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]]"[[printf "%c" 96]]
 [[end]]}
 
 func List[[.StructName]]s(c *gin.Context) {
@@ -310,10 +310,10 @@ const form = reactive<Record<string, any>>({
 function buildParams() {
   const params: Record<string, any> = { page: query.page, pageSize: query.pageSize }
 [[range .SearchFields]][[if eq .TsType "number"]]  if (query.[[.JSONName]] !== null && query.[[.JSONName]] !== undefined) {
-    params.[[.JSONName]] = query.[[.JSONName]]
+    params.[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]] = query.[[.JSONName]]
   }
 [[else]]  if (query.[[.JSONName]]) {
-    params.[[.JSONName]] = query.[[.JSONName]]
+    params.[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]] = query.[[.JSONName]]
   }
 [[end]][[end]]  return params
 }

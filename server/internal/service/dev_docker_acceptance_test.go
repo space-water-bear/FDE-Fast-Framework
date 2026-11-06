@@ -56,6 +56,14 @@ func TestDevelopmentDockerFirstDelivery(t *testing.T) {
 	if err := db.Create(&admin).Error; err != nil {
 		t.Fatal(err)
 	}
+	for _, menu := range []model.Menu{{Path: "system", Name: "System", Title: "系统管理", Type: 0, Icon: "Setting"}, {Path: "dashboard", Name: "Dashboard", Title: "首页", Component: "dashboard/index", Type: 1, Icon: "Odometer", Affix: true}} {
+		if err := db.Create(&menu).Error; err != nil {
+			t.Fatal(err)
+		}
+		if err := db.Model(&adminRole).Association("Menus").Append(&menu); err != nil {
+			t.Fatal(err)
+		}
+	}
 	defaultProject := model.DevProject{Base: model.Base{ID: 1}, Key: "default", Name: "默认项目"}
 	if err := db.Create(&defaultProject).Error; err != nil {
 		t.Fatal(err)
@@ -191,6 +199,10 @@ func TestDevelopmentDockerFirstDelivery(t *testing.T) {
 	}
 	operatorPassword := "qa-only-operator-password"
 	acceptanceRequest(t, "POST", deployed.URL+"/api/user", token, map[string]any{"username": "qa_operator", "password": operatorPassword, "nickname": "演示操作员", "enabled": true, "roleIds": []float64{operatorID}}, 200, 0)
+	filtered := acceptanceRequest(t, "GET", deployed.URL+"/api/repair_ticket/list?ticketNo=does-not-exist", token, nil, 200, 0)
+	if len(filtered["data"].(map[string]any)["list"].([]any)) != 0 {
+		t.Fatal("HTTP query names differ from frontend JSON field names")
+	}
 	operatorToken := acceptanceLogin(t, deployed.URL, "qa_operator", operatorPassword)
 	acceptanceRequest(t, "GET", deployed.URL+"/api/repair_ticket/list", operatorToken, nil, 200, 0)
 	acceptanceRequest(t, "GET", deployed.URL+"/api/biz/schema/biz_repair_ticket", operatorToken, nil, 200, 0)
