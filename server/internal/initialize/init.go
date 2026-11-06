@@ -58,6 +58,9 @@ func Run(cfg *config.Config) {
 	if err := seedData(); err != nil {
 		log.Fatalf("初始化种子数据失败: %v", err)
 	}
+	if err := ensureDevelopmentDefaults(); err != nil {
+		log.Fatalf("初始化开发项目失败: %v", err)
+	}
 	for name, fn := range map[string]func() error{
 		"代码生成器菜单":     ensureCodegenMenu,
 		"字典管理菜单":      ensureDictMenu,
@@ -73,6 +76,7 @@ func Run(cfg *config.Config) {
 		"表单生成apply按钮": ensureFormgenApplyButton,
 		"表单生成更新按钮":    ensureFormgenUpdateButton,
 		"代码生成工具":      ensureCodegenAiTools,
+		"开发项目权限":      ensureDevelopmentMenus,
 	} {
 		if err := fn(); err != nil {
 			log.Fatalf("初始化%s失败: %v", name, err)
@@ -106,8 +110,12 @@ func initDB(cfg *config.Config) error {
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{}, &model.AiUsage{},
 		&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{},
+		&model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{},
 	}, model.RegistryTables()...)
 	if err := db.AutoMigrate(models...); err != nil {
+		return err
+	}
+	if err := migrateFormgenProjectNamespace(db); err != nil {
 		return err
 	}
 	global.DB = db

@@ -187,7 +187,9 @@ const tableSelectKeyword = ref('')
 const formModel = computed(() => props.modelValue ?? {})
 
 const fieldEntries = computed<FieldEntry[]>(() =>
-  Object.entries(props.schema.fields ?? {}).map(([name, field]) => {
+  Object.entries(props.schema.fields ?? {})
+    .sort((a, b) => (a[1]['x-fde']?.sort ?? 0) - (b[1]['x-fde']?.sort ?? 0))
+    .map(([name, field]) => {
     const meta = resolveControl(field)
     const xui = field['x-ui'] ?? {}
     return {

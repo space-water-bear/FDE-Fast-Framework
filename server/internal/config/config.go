@@ -8,15 +8,22 @@ import (
 )
 
 type Config struct {
-	App     App     `yaml:"app"`
-	DB      DB      `yaml:"db"`
-	JWT     JWT     `yaml:"jwt"`
-	Seed    Seed    `yaml:"seed"`
-	Codegen Codegen `yaml:"codegen"`
-	Captcha Captcha `yaml:"captcha"`
-	Upload  Upload  `yaml:"upload"`
-	Zap     Zap     `yaml:"zap"`
-	MCP     MCP     `yaml:"mcp"`
+	App         App         `yaml:"app"`
+	DB          DB          `yaml:"db"`
+	JWT         JWT         `yaml:"jwt"`
+	Seed        Seed        `yaml:"seed"`
+	Codegen     Codegen     `yaml:"codegen"`
+	Captcha     Captcha     `yaml:"captcha"`
+	Upload      Upload      `yaml:"upload"`
+	Zap         Zap         `yaml:"zap"`
+	MCP         MCP         `yaml:"mcp"`
+	Development Development `yaml:"development"`
+}
+
+type Development struct {
+	WorkspaceDir string `yaml:"workspace-dir"`
+	TemplateRepo string `yaml:"template-repo"`
+	TemplateRef  string `yaml:"template-ref"`
 }
 
 type App struct {
@@ -118,6 +125,12 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Codegen.WebDir == "" {
 		cfg.Codegen.WebDir = "../web"
+	}
+	if cfg.Development.WorkspaceDir == "" {
+		cfg.Development.WorkspaceDir = "./data/workspaces"
+	}
+	if cfg.Development.TemplateRef == "" {
+		cfg.Development.TemplateRef = "HEAD"
 	}
 	return cfg, nil
 }

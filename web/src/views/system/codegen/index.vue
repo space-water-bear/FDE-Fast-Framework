@@ -4,7 +4,7 @@
       type="info"
       :closable="false"
       class="mb-12"
-      title="填写表信息与字段后，一键生成后端 CRUD + 前端页面（vxe-table 列表 + 搜索 + 表单弹窗）。生成后需重启后端服务并刷新页面，新菜单将出现在侧边栏。"
+      title="先预览后端 CRUD 与前端页面，再应用该预览。修改任何生成参数后须重新预览；应用后需重新编译后端并构建前端。"
     />
 
     <el-form :inline="true" class="mb-12">
@@ -82,27 +82,38 @@
 
     <div class="page-toolbar mt-12">
       <div class="toolbar-spacer" />
-      <el-button :icon="View" @click="handlePreview">预览</el-button>
-      <el-button type="primary" :icon="MagicStick" :loading="generating" @click="handleGenerate">生成代码</el-button>
+      <el-button :icon="View" :loading="previewing" :disabled="generating" @click="handlePreview">预览</el-button>
+      <el-button type="primary" :icon="MagicStick" :loading="generating" :disabled="!canApply" @click="handleGenerate">应用此预览</el-button>
     </div>
 
     <el-dialog v-model="previewVisible" title="生成预览" width="860px" top="4vh">
+      <template v-if="preview">
+        <p>批次：{{ preview.batchId }}</p>
+        <el-alert v-for="warning in preview.warnings ?? []" :key="warning" :title="warning" type="warning" :closable="false" />
+        <details><summary>文件差异与菜单计划</summary><pre>{{ JSON.stringify({ diff: preview.diff, menuPlan: preview.menuPlan }, null, 2) }}</pre></details>
+      </template>
+      <el-alert v-else title="参数已修改，此预览已失效，请重新预览。" type="warning" :closable="false" />
       <el-tabs v-model="activeFile">
         <el-tab-pane v-for="f in previewFiles" :key="f.path" :label="f.path.split('/').pop()" :name="f.path">
           <pre class="code-pre">{{ f.content }}</pre>
         </el-tab-pane>
       </el-tabs>
+      <template #footer>
+        <el-button @click="previewVisible = false">关闭</el-button>
+        <el-button type="primary" :disabled="!canApply" :loading="generating" @click="handleGenerate">应用此预览</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { MagicStick, Plus, View } from '@element-plus/icons-vue'
 import { generateCode, getCodegenOptions, previewCode } from '@/api/codegen'
-import type { FieldTypeOption, GenFile, GenFieldDef } from '@/api/codegen'
+import type { FieldTypeOption, GenFieldDef, GenPreview } from '@/api/codegen'
 import type { MenuInfo } from '@/api/auth'
+import { canApplyPreview, requestFingerprint } from './preview-state'
 
 const fieldTypes = ref<FieldTypeOption[]>([])
 const parentMenus = ref<MenuInfo[]>([])
@@ -137,9 +148,17 @@ const form = reactive({
 const structName = computed(() => toUpperCamel(form.tableName))
 
 const previewVisible = ref(false)
-const previewFiles = ref<GenFile[]>([])
+const preview = ref<GenPreview | null>(null)
+const previewFiles = computed(() => preview.value?.files ?? [])
+const previewFingerprint = ref('')
 const activeFile = ref('')
 const generating = ref(false)
+const previewing = ref(false)
+const currentFingerprint = computed(() => requestFingerprint(buildRequest()))
+const canApply = computed(() => !generating.value && !previewing.value
+  && canApplyPreview(preview.value, previewFingerprint.value, currentFingerprint.value))
+
+watch(currentFingerprint, () => { preview.value = null; previewFingerprint.value = '' }, { flush: 'sync' })
 
 function toUpperCamel(s: string) {
   const t = s.replace(/^(sys_|biz_|t_)/, '')
@@ -186,31 +205,62 @@ async function handlePreview() {
     ElMessage.warning(msg)
     return
   }
-  const data = await previewCode(buildRequest())
-  previewFiles.value = data.files
-  activeFile.value = data.files.length ? data.files[0].path : ''
-  previewVisible.value = true
+  const request = buildRequest()
+  const fingerprint = requestFingerprint(request)
+  preview.value = null
+  previewFingerprint.value = ''
+  previewing.value = true
+  try {
+    const data = await previewCode(request)
+    if (fingerprint !== currentFingerprint.value) {
+      ElMessage.warning('生成参数已改变，请重新预览')
+      return
+    }
+    if (!data.ok || !data.batchId) {
+      ElMessage.error(data.error?.msg ?? '预览失败，未生成可应用的批次')
+      return
+    }
+    preview.value = data
+    previewFingerprint.value = fingerprint
+    activeFile.value = data.files.length ? data.files[0].path : ''
+    previewVisible.value = true
+  } catch {
+    // 请求层已展示错误，失败请求不留下可应用批次。
+  } finally { previewing.value = false }
 }
 
 async function handleGenerate() {
-  const msg = validate()
-  if (msg) {
-    ElMessage.warning(msg)
+  if (!canApply.value || !preview.value) {
+    ElMessage.warning('请先生成有效预览')
     return
   }
+  const batchId = preview.value.batchId
   try {
-    await ElMessageBox.confirm('将写入后端/前端源码文件并创建菜单，生成后需要重启后端服务。确认生成？', '确认', {
+    await ElMessageBox.confirm('将应用已展示批次 ' + batchId + '，写入源码并创建菜单和权限。确认应用此预览？', '应用预览', {
       type: 'warning',
     })
   } catch {
     return
   }
+  if (!canApply.value || preview.value?.batchId !== batchId) {
+    ElMessage.warning('预览已失效，请重新预览')
+    return
+  }
   generating.value = true
   try {
-    const data = await generateCode(buildRequest())
-    const fileList = data.files.map((f) => f.path).join(' | ')
-    await ElMessageBox.alert('生成成功，已写入文件: ' + fileList + ' 下一步: 重启后端服务(go run .)，然后刷新页面，新菜单将出现在侧边栏。', '生成完成')
+    const data = await generateCode({ batchId, approve: true })
+    if (!data.ok) {
+      ElMessage.error(data.error?.msg ?? '应用失败，请重新预览并查看冲突')
+      return
+    }
+    previewVisible.value = false
+    const fileList = (data.applied ?? []).map((f) => f.path).join(' | ')
+    await ElMessageBox.alert('已写入文件: ' + fileList + '。请重新编译后端并构建前端后验证业务页面。', '应用完成')
+  } catch {
+    // 请求层展示执行错误；无论结果如何，本次预览都必须重新获取。
   } finally {
+    preview.value = null
+    previewFingerprint.value = ''
     generating.value = false
   }
 }

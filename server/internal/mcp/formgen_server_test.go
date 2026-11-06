@@ -80,7 +80,7 @@ func TestFormgenServerListTools(t *testing.T) {
 			}
 		case "apply_files":
 			props, _ := schema["properties"].(map[string]any)
-			if props == nil || props["approve"] == nil {
+			if props == nil || props["approve"] == nil || !strings.Contains(tool.Description, "APPROVAL_REQUIRED") {
 				t.Fatalf("tool apply_files schema missing approve: %s", string(b))
 			}
 		}
@@ -131,5 +131,33 @@ func TestFormgenServerCallUnknownTool(t *testing.T) {
 	_, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "unknown_tool"})
 	if err == nil || !strings.Contains(err.Error(), "unknown tool") {
 		t.Fatalf("expected unknown tool error, got %v", err)
+	}
+}
+
+func TestMCPServiceSchemaContractSupportsFullPreviewWithoutWriting(t *testing.T) {
+	setupMcpFormgenDB(t)
+	session := connectFormgenMCP(t)
+	schema := map[string]any{"objectKey": "biz_full_mcp", "name": "Full schema", "fields": map[string]any{"name": map[string]any{"type": "string", "x-fde": map[string]any{"type": "string", "inForm": true}}}}
+	result, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "generate_form_schema", Arguments: map[string]any{"schema": schema, "dryRun": true}})
+	if err != nil || result.IsError {
+		t.Fatalf("full schema preview: %v %+v", err, result)
+	}
+	text := result.Content[0].(*mcpsdk.TextContent).Text
+	if !strings.Contains(text, `"ok":true`) {
+		t.Fatalf("preview failed: %s", text)
+	}
+	result, err = session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "generate_form_schema", Arguments: map[string]any{"schema": schema, "dryRun": false}})
+	if err == nil && !result.IsError {
+		denial := result.Content[0].(*mcpsdk.TextContent).Text
+		if !strings.Contains(denial, `"ok":false`) || !strings.Contains(denial, "ENGINEERING_SCOPE_REQUIRED") {
+			t.Fatalf("service write was not rejected: %s", denial)
+		}
+	}
+	var n int64
+	if err := global.DB.Model(&model.BizObject{}).Count(&n).Error; err != nil {
+		t.Fatal(err)
+	}
+	if n != 0 {
+		t.Fatalf("service identity wrote %d objects", n)
 	}
 }

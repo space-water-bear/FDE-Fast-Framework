@@ -355,7 +355,12 @@ type aiChatReq struct {
 func ListAiSessions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	list, total, err := service.ListAiSessions(c.Query("keyword"), page, pageSize)
+	claims := utils.GetClaims(c)
+	if claims == nil {
+		utils.NoAuth(c, "未登录")
+		return
+	}
+	list, total, err := service.ListAiSessionsForUser(claims.UserID, c.Query("keyword"), page, pageSize)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -374,7 +379,17 @@ func CreateAiSession(c *gin.Context) {
 		utils.NoAuth(c, "未登录")
 		return
 	}
-	session, err := service.CreateAiSession(req.Title, req.AgentID, claims.UserID)
+	scope, ok := requestEngineeringIdentity(c)
+	if !ok {
+		return
+	}
+	if scope.ProjectID != model.DefaultProjectID {
+		if _, err := service.EngineeringProject(scope); err != nil {
+			utils.Forbidden(c, err.Error())
+			return
+		}
+	}
+	session, err := service.CreateAiSessionInProject(req.Title, req.AgentID, claims.UserID, scope.ProjectID)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -388,6 +403,9 @@ func DeleteAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
+		return
+	}
 	if err := service.DeleteAiSession(id); err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -399,6 +417,9 @@ func ListAiMessages(c *gin.Context) {
 	id, err := utils.ParseID(c)
 	if err != nil {
 		utils.Fail(c, "参数错误")
+		return
+	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
 		return
 	}
 	list, err := service.ListAiMessages(id)
@@ -415,12 +436,16 @@ func ChatAi(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	var req aiChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.Fail(c, "请输入内容")
 		return
 	}
-	msg, err := service.ChatAi(id, req.Content)
+	msg, err := service.ChatAiWithContext(ctx, id, req.Content)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -436,6 +461,9 @@ func RenameAiSession(c *gin.Context) {
 	id, err := utils.ParseID(c)
 	if err != nil {
 		utils.Fail(c, "参数错误")
+		return
+	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
 		return
 	}
 	var req aiRenameReq
@@ -456,6 +484,9 @@ func ClearAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
+		return
+	}
 	if err := service.ClearAiSession(id); err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -469,7 +500,11 @@ func RegenerateAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
-	msg, err := service.RegenerateAiSession(id)
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
+	msg, err := service.RegenerateAiSessionWithContext(ctx, id)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -483,6 +518,10 @@ func ResendAiMessage(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	mid64, err := strconv.ParseUint(c.Param("mid"), 10, 64)
 	if err != nil {
 		utils.Fail(c, "参数错误")
@@ -494,7 +533,7 @@ func ResendAiMessage(c *gin.Context) {
 		utils.Fail(c, "请输入内容")
 		return
 	}
-	msg, err := service.ResendAiMessage(id, mid, req.Content)
+	msg, err := service.ResendAiMessageWithContext(ctx, id, mid, req.Content)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -531,6 +570,10 @@ func StreamChatAi(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	var req aiChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.Fail(c, "请输入内容")
@@ -541,13 +584,13 @@ func StreamChatAi(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
+	flusher, streamOK := c.Writer.(http.Flusher)
+	if !streamOK {
 		utils.Fail(c, "当前服务器不支持流式输出")
 		return
 	}
 
-	full, err := service.StreamChatAiTo(c.Request.Context(), id, req.Content, func(delta string) {
+	full, err := service.StreamChatAiTo(ctx, id, req.Content, func(delta string) {
 		b, _ := json.Marshal(gin.H{"delta": delta})
 		fmt.Fprintf(c.Writer, "data: %s\n\n", b)
 		flusher.Flush()

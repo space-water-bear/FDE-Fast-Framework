@@ -68,6 +68,13 @@ func NewRouter() *gin.Engine {
 		authed.GET("/formgen/schema/:objectKey", api.GetFormgenSchema)
 		authed.POST("/formgen/schema/preview", api.PreviewFormgenSchema)
 		authed.POST("/formgen/apply", api.FormgenApply)
+		authed.POST("/formgen/objects/:objectKey/activate", api.ActivateFormgenObject)
+
+		authed.GET("/dev/projects", api.ListDevProjects)
+		authed.POST("/dev/projects", api.CreateDevProject)
+		authed.POST("/dev/runs", api.CreateDevRun)
+		authed.GET("/dev/runs/:key", api.GetDevRun)
+		authed.POST("/dev/runs/:key/cancel", api.CancelDevRun)
 
 		authed.GET("/dict/types", api.ListDictTypes)
 		authed.POST("/dict/type", api.CreateDictType)

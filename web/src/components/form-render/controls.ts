@@ -50,7 +50,9 @@ export function resolveControl(field: FormFieldSchema): ControlMeta {
   if (control && hasOwn(CONTROL_REGISTRY, control)) {
     return CONTROL_REGISTRY[control as ControlType]
   }
-  return CONTROL_REGISTRY[defaultControlForType(field.type)]
+  if (field.enum?.length) return CONTROL_REGISTRY.select
+  if (field.format === 'date-time') return CONTROL_REGISTRY.datetime
+  return CONTROL_REGISTRY[defaultControlForType(field['x-fde']?.type ?? field.type)]
 }
 
 export function enumOptions(field: FormFieldSchema): FormOption[] {

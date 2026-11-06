@@ -1,5 +1,6 @@
 <template>
   <div class="schema-editor">
+    <el-alert type="info" :closable="false" title="完整规则、关联、联动及扩展配置保留在 Schema JSON 中；可视化编辑只修改所选属性。" />
     <div class="editor-meta">
       <div class="meta-grid">
         <div class="meta-item">
@@ -73,12 +74,13 @@
           <div class="field-grid-item">
             <span class="field-label">类型</span>
             <el-select
-              :model-value="field.type ?? 'string'"
+              :model-value="currentType(field)"
               size="small"
               class="control-full"
               @update:model-value="onTypeChange(name, $event)"
             >
               <el-option v-for="item in TYPE_OPTIONS" :key="item" :label="item" :value="item" />
+              <el-option v-if="!TYPE_OPTIONS.includes(currentType(field) as any)" :label="currentType(field) + '（请用 JSON 编辑）'" :value="currentType(field)" disabled />
             </el-select>
           </div>
           <div class="field-grid-item">
@@ -128,6 +130,10 @@
               @update:model-value="setXui(name, 'dict', $event)"
             />
           </div>
+          <div class="field-grid-item" v-for="flag in FIELD_FLAGS" :key="flag.key">
+            <span class="field-label">{{ flag.label }}</span>
+            <el-switch :model-value="field['x-fde']?.[flag.key] ?? false" size="small" @update:model-value="setFlag(name, flag.key, Boolean($event))" />
+          </div>
         </div>
 
         <div class="options-editor">
@@ -160,18 +166,20 @@
 import { computed, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { ArrowDown, ArrowUp, Delete, Plus } from '@element-plus/icons-vue'
-import { CONTROL_REGISTRY, defaultControlForType } from '@/components/form-render/controls'
-import type { ControlType, FormFieldSchema, FormOption, FormSchema, XUi } from '@/components/form-render/types'
+import { CONTROL_REGISTRY, defaultControlForType, resolveControl } from '@/components/form-render/controls'
+import type { BusinessFieldType, ControlType, FormFieldSchema, FormOption, FormSchema, XUi } from '@/components/form-render/types'
+import { businessTypeForField, fieldHasReferences, moveSchemaField, orderedFields, parseOptionValue, renameSchemaField } from './schema-payload'
 
 const props = defineProps<{ modelValue: FormSchema }>()
 const emit = defineEmits<{ (e: 'update:modelValue', value: FormSchema): void }>()
 
 const TYPE_OPTIONS = ['string', 'text', 'int', 'float', 'bool', 'datetime', 'enum', 'relation'] as const
 const CONTROL_OPTIONS = Object.keys(CONTROL_REGISTRY) as ControlType[]
+const FIELD_FLAGS = [{ key: 'searchable', label: '可查询' }, { key: 'inList', label: '列表显示' }, { key: 'inForm', label: '表单显示' }] as const
 
 const schema = computed(() => props.modelValue)
 const fieldEntries = computed<[string, FormFieldSchema][]>(() =>
-  Object.entries(props.modelValue.fields ?? {}),
+  orderedFields(props.modelValue),
 )
 const renameTick = ref(0)
 
@@ -207,40 +215,60 @@ function onTypeChange(name: string, type: string): void {
   const fields = { ...props.modelValue.fields }
   const field = fields[name] ?? {}
   const xui = { ...(field['x-ui'] ?? {}), control: defaultControlForType(type) }
-  fields[name] = { ...field, type, 'x-ui': xui } as FormFieldSchema
+  const jsonType = ({ text: 'string', int: 'integer', float: 'number', bool: 'boolean', datetime: 'string', enum: 'string', relation: 'integer' } as Record<string, string>)[type] ?? type
+  fields[name] = { ...field, type: jsonType, 'x-ui': xui, 'x-fde': { ...field['x-fde'], type: type as BusinessFieldType } }
+  if (type === 'datetime') fields[name].format = 'date-time'
+  else if (field.format === 'date-time') delete fields[name].format
   emitSchema({ ...props.modelValue, fields })
 }
 
+function currentType(field: FormFieldSchema): string {
+  try { return businessTypeForField(field) } catch { return field.type ?? 'unknown' }
+}
+
+function setFlag(name: string, key: 'searchable' | 'inList' | 'inForm', value: boolean): void {
+  const field = props.modelValue.fields[name]
+  setField(name, { 'x-fde': { ...field['x-fde'], [key]: value } })
+}
+
 function currentControl(field: FormFieldSchema): ControlType {
-  return field['x-ui']?.control ?? defaultControlForType(field.type)
+  return resolveControl(field).control
 }
 
 function optionsOf(field: FormFieldSchema): FormOption[] {
-  return (field['x-ui']?.options ?? []).map((opt) => ({ label: opt.label, value: opt.value }))
+  return field['x-ui']?.options ?? (field.enum ?? []).map((value) => ({ label: String(value), value }))
+}
+
+function setOptions(name: string, options: FormOption[]): void {
+  const field = props.modelValue.fields[name]
+  const patch: Partial<FormFieldSchema> = { 'x-ui': { ...field['x-ui'], options } }
+  if (field.enum || currentType(field) === 'enum') patch.enum = options.map((option) => option.value)
+  setField(name, patch)
 }
 
 function setOption(name: string, index: number, key: 'label' | 'value', value: string): void {
   const field = props.modelValue.fields[name]
-  const xui = field?.['x-ui'] ?? {}
-  const options = [...(xui.options ?? [])]
+  const options = [...optionsOf(field)]
   const current = options[index] ?? { label: '', value: '' }
-  options[index] = { ...current, [key]: value }
-  setXui(name, 'options', options)
+  try {
+    options[index] = { ...current, [key]: key === 'value' ? parseOptionValue(value, current.value) : value }
+    setOptions(name, options)
+  } catch (error) {
+    ElMessage.warning((error as Error).message)
+  }
 }
 
 function addOption(name: string): void {
   const field = props.modelValue.fields[name]
-  const xui = field?.['x-ui'] ?? {}
-  const options = [...(xui.options ?? []), { label: '', value: '' }]
-  setXui(name, 'options', options)
+  const options = [...optionsOf(field), { label: '', value: '' }]
+  setOptions(name, options)
 }
 
 function removeOption(name: string, index: number): void {
   const field = props.modelValue.fields[name]
-  const xui = field?.['x-ui'] ?? {}
-  const options = [...(xui.options ?? [])]
+  const options = [...optionsOf(field)]
   options.splice(index, 1)
-  setXui(name, 'options', options)
+  setOptions(name, options)
 }
 
 function addField(): void {
@@ -254,12 +282,17 @@ function addField(): void {
     title: '字段' + index,
     type: 'string',
     required: false,
+    'x-fde': { type: 'string', sort: Object.keys(fields).length, searchable: false, inList: true, inForm: true },
     'x-ui': { control: 'input', colSpan: 12 },
   }
   emitSchema({ ...props.modelValue, fields })
 }
 
 function removeField(name: string): void {
+  if (fieldHasReferences(props.modelValue, name)) {
+    ElMessage.warning('该字段存在关联或联动，请先在 Schema JSON 中明确调整引用后再删除')
+    return
+  }
   const fields = { ...props.modelValue.fields }
   delete fields[name]
   emitSchema({ ...props.modelValue, fields })
@@ -275,16 +308,7 @@ function isLast(name: string): boolean {
 }
 
 function moveField(name: string, dir: -1 | 1): void {
-  const entries = Object.entries(props.modelValue.fields)
-  const index = entries.findIndex(([itemName]) => itemName === name)
-  const target = index + dir
-  if (index < 0 || target < 0 || target >= entries.length) return
-  const [item] = entries.splice(index, 1)
-  entries.splice(target, 0, item)
-  emitSchema({
-    ...props.modelValue,
-    fields: Object.fromEntries(entries) as Record<string, FormFieldSchema>,
-  })
+  emitSchema(moveSchemaField(props.modelValue, name, dir))
 }
 
 function renameField(oldName: string, rawName: string | number): void {
@@ -295,17 +319,12 @@ function renameField(oldName: string, rawName: string | number): void {
     return
   }
   if (newName === oldName) return
-  const fields = props.modelValue.fields
-  if (Object.prototype.hasOwnProperty.call(fields, newName)) {
+  try {
+    emitSchema(renameSchemaField(props.modelValue, oldName, newName))
+  } catch (error) {
     renameTick.value += 1
-    ElMessage.warning('字段名 ' + newName + ' 已存在')
-    return
+    ElMessage.warning((error as Error).message)
   }
-  const nextFields: Record<string, FormFieldSchema> = {}
-  for (const [name, field] of Object.entries(fields)) {
-    nextFields[name === oldName ? newName : name] = field
-  }
-  emitSchema({ ...props.modelValue, fields: nextFields })
 }
 </script>
 

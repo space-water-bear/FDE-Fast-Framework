@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -62,9 +63,21 @@ func seedBizCustomer(t *testing.T) {
 	}
 }
 
+func codegenTestContext() context.Context {
+	return WithEngineeringScope(context.Background(), EngineeringScope{ActorID: 1, ProjectID: model.DefaultProjectID})
+}
+
+func applyCodegenAsUser(args string) (any, error) {
+	var in ApplyFilesInput
+	if err := json.Unmarshal([]byte(args), &in); err != nil {
+		return nil, err
+	}
+	return ApplyFormgenFiles(in, 1)
+}
+
 func mustDryRun(t *testing.T) *BusinessCodeResult {
 	t.Helper()
-	got, err := GenerateBusinessCode(context.Background(), `{"objectKey":"biz_customer","dryRun":true}`)
+	got, err := GenerateBusinessCode(codegenTestContext(), `{"objectKey":"biz_customer","dryRun":true}`)
 	if err != nil {
 		t.Fatalf("GenerateBusinessCode: %v", err)
 	}
@@ -116,7 +129,7 @@ func TestGenerateBusinessCodeDryRun(t *testing.T) {
 	setupCodegenBusinessDB(t)
 	seedBizCustomer(t)
 
-	got, err := GenerateBusinessCode(context.Background(), `{"objectKey":"biz_customer","dryRun":true}`)
+	got, err := GenerateBusinessCode(codegenTestContext(), `{"objectKey":"biz_customer","dryRun":true}`)
 	if err != nil {
 		t.Fatalf("GenerateBusinessCode: %v", err)
 	}
@@ -155,6 +168,12 @@ func TestGenerateBusinessCodeDryRun(t *testing.T) {
 	if audit.Action != "dry_run" || audit.Status != "pending" || audit.Tool != "generate_business_code" {
 		t.Fatalf("audit = %+v", audit)
 	}
+	if audit.UserID != 1 || audit.ProjectID != model.DefaultProjectID {
+		t.Fatalf("preview lost trusted actor/project: %+v", audit)
+	}
+	if len(res.Baselines) != len(res.Files) || res.RootHash == "" || res.ObjectVersion != 1 || res.ExpiresAt.IsZero() {
+		t.Fatalf("preview does not fix its apply baseline: %+v", res)
+	}
 }
 
 func TestApplyFilesSuccess(t *testing.T) {
@@ -162,7 +181,7 @@ func TestApplyFilesSuccess(t *testing.T) {
 	seedBizCustomer(t)
 	dry := mustDryRun(t)
 
-	got, err := ApplyFiles(context.Background(), fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
+	got, err := applyCodegenAsUser(fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
 	if err != nil {
 		t.Fatalf("ApplyFiles: %v", err)
 	}
@@ -230,12 +249,6 @@ func TestApplyFilesRollbackOnWriteFailure(t *testing.T) {
 	dry := mustDryRun(t)
 
 	webAPIPath := filepath.Join(global.Config.Codegen.WebDir, "src", "api", "customer.ts")
-	if err := os.MkdirAll(filepath.Dir(webAPIPath), 0o755); err != nil {
-		t.Fatalf("mkdir web api dir: %v", err)
-	}
-	if err := os.WriteFile(webAPIPath, []byte("OLD-CONTENT"), 0o644); err != nil {
-		t.Fatalf("write old web api: %v", err)
-	}
 	testWriteFailpoint = func(p string) error {
 		if strings.HasSuffix(p, "index.vue") {
 			return errors.New("注入: 写盘失败")
@@ -243,7 +256,7 @@ func TestApplyFilesRollbackOnWriteFailure(t *testing.T) {
 		return nil
 	}
 
-	got, err := ApplyFiles(context.Background(), fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
+	got, err := applyCodegenAsUser(fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
 	if err != nil {
 		t.Fatalf("ApplyFiles: %v", err)
 	}
@@ -251,9 +264,8 @@ func TestApplyFilesRollbackOnWriteFailure(t *testing.T) {
 	if ares.OK || ares.Error == nil || ares.Error.Code != 40001 {
 		t.Fatalf("expected 40001 failure, got ok=%v err=%+v", ares.OK, ares.Error)
 	}
-	data, err := os.ReadFile(webAPIPath)
-	if err != nil || string(data) != "OLD-CONTENT" {
-		t.Fatalf("web api not restored: data=%q err=%v", data, err)
+	if _, err := os.Stat(webAPIPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new web API should be removed after rollback: %v", err)
 	}
 	modelPath := filepath.Join(global.Config.Codegen.ServerDir, "internal", "model", "customer.go")
 	if _, err := os.Stat(modelPath); !errors.Is(err, os.ErrNotExist) {
@@ -281,15 +293,9 @@ func TestApplyFilesRollbackDeletesMenu(t *testing.T) {
 	dry := mustDryRun(t)
 
 	webAPIPath := filepath.Join(global.Config.Codegen.WebDir, "src", "api", "customer.ts")
-	if err := os.MkdirAll(filepath.Dir(webAPIPath), 0o755); err != nil {
-		t.Fatalf("mkdir web api dir: %v", err)
-	}
-	if err := os.WriteFile(webAPIPath, []byte("OLD-CONTENT"), 0o644); err != nil {
-		t.Fatalf("write old web api: %v", err)
-	}
 	testCasbinRebuildFailpoint = func() error { return errors.New("注入: casbin 重建失败") }
 
-	got, err := ApplyFiles(context.Background(), fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
+	got, err := applyCodegenAsUser(fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
 	if err != nil {
 		t.Fatalf("ApplyFiles: %v", err)
 	}
@@ -297,9 +303,8 @@ func TestApplyFilesRollbackDeletesMenu(t *testing.T) {
 	if ares.OK || ares.Error == nil || ares.Error.Code != 40001 {
 		t.Fatalf("expected 40001 failure, got ok=%v err=%+v", ares.OK, ares.Error)
 	}
-	data, err := os.ReadFile(webAPIPath)
-	if err != nil || string(data) != "OLD-CONTENT" {
-		t.Fatalf("web api not restored: data=%q err=%v", data, err)
+	if _, err := os.Stat(webAPIPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new web API should be removed after rollback: %v", err)
 	}
 	modelPath := filepath.Join(global.Config.Codegen.ServerDir, "internal", "model", "customer.go")
 	if _, err := os.Stat(modelPath); !errors.Is(err, os.ErrNotExist) {
@@ -339,7 +344,7 @@ func TestApplyFilesRollbackOnPathConflict(t *testing.T) {
 		t.Fatalf("mkdir conflict: %v", err)
 	}
 
-	got, err := ApplyFiles(context.Background(), fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
+	got, err := applyCodegenAsUser(fmt.Sprintf(`{"batchId":"%s","approve":true}`, dry.BatchID))
 	if err != nil {
 		t.Fatalf("ApplyFiles: %v", err)
 	}
@@ -359,8 +364,8 @@ func TestApplyFilesRollbackOnPathConflict(t *testing.T) {
 	if err := global.DB.Where("batch_id = ?", dry.BatchID).First(&audit).Error; err != nil {
 		t.Fatalf("audit query: %v", err)
 	}
-	if audit.Status != "rolled_back" {
-		t.Fatalf("audit status = %s, want rolled_back", audit.Status)
+	if audit.Status != "pending" {
+		t.Fatalf("audit status = %s, want pending", audit.Status)
 	}
 }
 
@@ -383,15 +388,17 @@ func TestCodegenPreviewGenerateRegression(t *testing.T) {
 	if len(files) != 6 {
 		t.Fatalf("CodegenPreview files = %d, want 6", len(files))
 	}
-	files2, menuID, err := CodegenGenerate(req)
-	if err != nil {
-		t.Fatalf("CodegenGenerate: %v", err)
+	if _, _, err := CodegenGenerate(req); err == nil || !strings.Contains(err.Error(), "APPROVAL_REQUIRED") {
+		t.Fatalf("legacy generation must require a reviewed batch: %v", err)
 	}
-	if len(files2) != 6 {
-		t.Fatalf("CodegenGenerate files = %d, want 6", len(files2))
+	dry, err := CodegenBusinessPreview(req, 1)
+	if err != nil || !dry.OK {
+		t.Fatalf("preview: %+v %v", dry, err)
 	}
-	if menuID == 0 {
-		t.Fatalf("CodegenGenerate menuID = 0")
+	approve := true
+	applied, err := ApplyFormgenFiles(ApplyFilesInput{BatchID: dry.BatchID, Approve: &approve}, 1)
+	if err != nil || !applied.OK {
+		t.Fatalf("explicit apply: %+v %v", applied, err)
 	}
 	modelPath := filepath.Join(global.Config.Codegen.ServerDir, "internal", "model", "order.go")
 	if _, err := os.Stat(modelPath); err != nil {

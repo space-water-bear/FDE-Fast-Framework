@@ -1,9 +1,11 @@
 package initialize
 
 import (
+	"encoding/json"
 	"fde-admin/internal/global"
 	"fde-admin/internal/model"
 	"fde-admin/internal/service"
+	"fde-admin/internal/toolcontract"
 	"fde-admin/internal/utils"
 )
 
@@ -327,40 +329,51 @@ func ensureAiSessionStreamButton() error {
 
 // ensureAiMenus AI 助手目录与子菜单(幂等)
 
-// ensureFormgenAiTool 为老库补齐 generate_form_schema 工具定义(幂等)
-func ensureFormgenAiTool() error {
-	var n int64
-	if err := global.DB.Model(&model.AiTool{}).Where("name = ?", "generate_form_schema").Count(&n).Error; err != nil {
-		return err
+// ensureFormgenAiTool upgrades only recognizable built-in protocol metadata.
+func ensureFormgenAiTool() error { return ensureEngineeringToolDefinitions("generate_form_schema") }
+
+func ensureEngineeringToolDefinitions(names ...string) error {
+	wanted := map[string]bool{}
+	for _, name := range names {
+		wanted[name] = true
 	}
-	if n > 0 {
-		return nil
+	for _, definition := range toolcontract.Definitions(false) {
+		if !wanted[definition.Name] {
+			continue
+		}
+		var existing []model.AiTool
+		if err := global.DB.Where("name = ?", definition.Name).Find(&existing).Error; err != nil {
+			return err
+		}
+		raw, err := json.Marshal(definition.Schema)
+		if err != nil {
+			return err
+		}
+		if len(existing) == 0 {
+			marker := "代码生成器 P3"
+			if definition.Name == "generate_form_schema" {
+				marker = "表单生成器 P1"
+			}
+			if err := global.DB.Create(&model.AiTool{Name: definition.Name, Description: definition.Description, Schema: string(raw), Enabled: true, Remark: marker}).Error; err != nil {
+				return err
+			}
+			continue
+		}
+		for _, item := range existing {
+			// Names alone do not make a user-created tool ours to overwrite.
+			expectedMarker := "代码生成器 P3"
+			if definition.Name == "generate_form_schema" {
+				expectedMarker = "表单生成器 P1"
+			}
+			if item.Remark != expectedMarker {
+				continue
+			}
+			if err := global.DB.Model(&item).Updates(map[string]any{"schema": string(raw), "description": definition.Description}).Error; err != nil {
+				return err
+			}
+		}
 	}
-	tool := &model.AiTool{
-		Name:        "generate_form_schema",
-		Description: "根据业务对象生成 FDE Form Schema(JSON Schema 子集 + x-ui/x-linkages)",
-		Schema: `{
-  "type": "object", "required": ["objectKey", "name", "fields"],
-  "properties": {
-    "objectKey": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
-    "name": {"type": "string", "maxLength": 64},
-    "fields": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/fieldDef"}},
-    "relations": {"type": "array", "items": {
-      "type": "object", "required": ["field", "targetObject", "kind"],
-      "properties": {"field": {"type": "string"}, "targetObject": {"type": "string"},
-                     "kind": {"enum": ["many_to_one", "one_to_many"]}}}},
-    "mode": {"enum": ["create", "update"]},
-    "dryRun": {"type": "boolean", "default": true}
-  },
-  "$defs": {"fieldDef": {"type": "object", "required": ["name", "type"],
-    "properties": {"name": {"type": "string"}, "title": {"type": "string"},
-      "type": {"enum": ["string","text","int","float","bool","datetime","enum","relation"]},
-      "required": {"type": "boolean"}, "rules": {"type": "object"}, "x-ui": {"type": "object"}}}}
-}`,
-		Enabled: true,
-		Remark:  "表单生成器 P1",
-	}
-	return global.DB.Create(tool).Error
+	return nil
 }
 
 // ensureFormgenMenu 表单生成菜单与预览按钮(幂等)
@@ -433,66 +446,9 @@ func ensureFormgenUpdateButton() error {
 	return service.RebuildCasbin()
 }
 
-// ensureCodegenAiTools 为老库补齐 P3 代码生成工具定义(幂等)
+// ensureCodegenAiTools preserves enablement and user-defined tools while upgrading built-ins.
 func ensureCodegenAiTools() error {
-	defs := []model.AiTool{
-		{
-			Name:        "generate_business_code",
-			Description: "基于统一业务对象模型生成 CRUD 代码(dry-run 预览, 不写盘)",
-			Schema: `{
-  "type": "object", "required": ["objectKey", "business"],
-  "properties": {
-    "objectKey": {"type": "string"},
-    "business": {"type": "string", "maxLength": 64},
-    "tableName": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
-    "structName": {"type": "string"},
-    "parentMenuId": {"type": "integer"},
-    "fields": {"type": "array", "items": {"$ref": "#/$defs/fieldDef"}},
-    "dryRun": {"type": "boolean", "default": true}
-  },
-  "$defs": {"fieldDef": {"type": "object", "required": ["name", "type"],
-    "properties": {"name": {"type": "string"}, "title": {"type": "string"},
-      "type": {"enum": ["string","text","int","float","bool","datetime"]},
-      "search": {"type": "boolean"}, "inList": {"type": "boolean"},
-      "inForm": {"type": "boolean"}, "required": {"type": "boolean"}}}}
-}`,
-			Enabled: true,
-			Remark:  "代码生成器 P3",
-		},
-		{
-			Name:        "apply_files",
-			Description: "确认写入 dry-run 批次文件并执行快照/菜单授权/casbin 重建(approve 必须显式 true)",
-			Schema: `{
-  "type": "object", "required": ["batchId", "approve"],
-  "properties": {
-    "batchId": {"type": "string", "description": "dry-run 返回的批次号"},
-    "objectKey": {"type": "string"},
-    "files": {"type": "array", "items": {"type": "object",
-      "required": ["path", "content"],
-      "properties": {"path": {"type": "string"}, "content": {"type": "string"}}}},
-    "applyMenu": {"type": "boolean", "default": true},
-    "parentMenuId": {"type": "integer"},
-    "snapshot": {"type": "boolean", "default": true},
-    "approve": {"const": true, "description": "必须显式为 true 才执行写盘"}
-  }
-}`,
-			Enabled: true,
-			Remark:  "代码生成器 P3",
-		},
-	}
-	for _, tool := range defs {
-		var n int64
-		if err := global.DB.Model(&model.AiTool{}).Where("name = ?", tool.Name).Count(&n).Error; err != nil {
-			return err
-		}
-		if n > 0 {
-			continue
-		}
-		if err := global.DB.Create(&tool).Error; err != nil {
-			return err
-		}
-	}
-	return nil
+	return ensureEngineeringToolDefinitions("generate_business_code", "apply_files")
 }
 
 func ensureAiMenus() error {

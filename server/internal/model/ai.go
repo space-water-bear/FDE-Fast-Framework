@@ -73,9 +73,10 @@ func (AiMcpServer) TableName() string { return "sys_ai_mcp_servers" }
 // AiSession 会话
 type AiSession struct {
 	Base
-	Title   string `json:"title" gorm:"size:128"`
-	AgentID uint   `json:"agentId" gorm:"index"`
-	UserID  uint   `json:"userId" gorm:"index"`
+	ProjectID uint   `json:"projectId" gorm:"index;default:1"`
+	Title     string `json:"title" gorm:"size:128"`
+	AgentID   uint   `json:"agentId" gorm:"index"`
+	UserID    uint   `json:"userId" gorm:"index"`
 }
 
 func (AiSession) TableName() string { return "sys_ai_sessions" }
