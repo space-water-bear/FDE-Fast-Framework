@@ -185,7 +185,7 @@ func DeployDevelopmentRelease(ctx context.Context, scope EngineeringScope, key, 
 			}
 		}
 	}()
-	common := []string{"--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", "512m", "--cpus", "1", "--tmpfs", "/tmp:rw,nosuid,size=64m", "--mount", "type=bind,src=" + installed.ReleasePath + ",dst=/release,readonly", "--mount", "type=bind,src=" + installed.SharedDir + ",dst=/shared"}
+	common := []string{"--user", fmt.Sprintf("%d:%d", os.Getuid(), os.Getgid()), "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "256", "--memory", "512m", "--cpus", "1", "--tmpfs", "/tmp:rw,nosuid,size=64m", "--mount", "type=bind,src=" + installed.ReleasePath + ",dst=/release,readonly", "--mount", "type=bind,src=" + installed.SharedDir + ",dst=/shared"}
 	for _, command := range []string{"bootstrap", "verify"} {
 		container := name + "-" + command
 		if err := removeDevelopmentContainer(target, container); err != nil {

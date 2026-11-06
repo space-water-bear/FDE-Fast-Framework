@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -45,7 +46,7 @@ func TestDevelopmentDockerFirstDelivery(t *testing.T) {
 	if err := db.AutoMigrate(&model.User{}, &model.Role{}, &model.Menu{}, &model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{}, &model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{}, &model.AiUsage{}, &model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{}, &model.DevRelease{}, &model.DevDeployment{}); err != nil {
 		t.Fatal(err)
 	}
-	global.Config = &config.Config{App: config.App{Mode: "debug"}, Codegen: config.Codegen{ServerDir: filepath.Join(repo, "server"), WebDir: filepath.Join(repo, "web")}, Development: config.Development{TemplateRepo: repo, TemplateRef: "HEAD", WorkspaceDir: filepath.Join(root, "workspaces"), ReleaseDir: filepath.Join(root, "releases"), TargetDir: filepath.Join(root, "targets")}}
+	global.Config = &config.Config{App: config.App{Mode: "debug"}, Codegen: config.Codegen{ServerDir: filepath.Join(repo, "server"), WebDir: filepath.Join(repo, "web")}, Development: config.Development{TargetArch: runtime.GOARCH, TemplateRepo: repo, TemplateRef: "HEAD", WorkspaceDir: filepath.Join(root, "workspaces"), ReleaseDir: filepath.Join(root, "releases"), TargetDir: filepath.Join(root, "targets")}}
 	password, _ := utils.HashPassword("123456")
 	adminRole := model.Role{Name: "管理员", Code: "admin", Enabled: true}
 	if err := db.Create(&adminRole).Error; err != nil {
