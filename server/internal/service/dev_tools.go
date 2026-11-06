@@ -314,6 +314,16 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 		if err != nil {
 			return nil, err
 		}
+		var draft map[string]any
+		if json.Unmarshal([]byte(obj.Schema), &draft) != nil {
+			return nil, errors.New("业务草稿Schema无效")
+		}
+		if linkages, ok := draft["x-linkages"].([]any); ok && len(linkages) > 0 {
+			return nil, errors.New("当前基础单表生成不支持草稿联动规则，已停止生成以保留业务语义")
+		}
+		if relations, ok := draft["x-relations"].([]any); ok && len(relations) > 0 {
+			return nil, errors.New("当前基础单表生成不支持对象关系")
+		}
 		req.TableName = obj.Table
 		if req.TableName == "" {
 			req.TableName = obj.Key
@@ -322,6 +332,11 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 		for _, field := range fields {
 			if field.Type == "enum" || field.Type == "relation" {
 				return nil, errors.New("当前首次交付仅支持基本字段；枚举/关联请使用后续增量能力")
+			}
+			var ui map[string]any
+			_ = json.Unmarshal([]byte(field.XUI), &ui)
+			if dictionary, ok := ui["dict"]; ok && dictionary != nil && dictionary != "" && dictionary != float64(0) {
+				return nil, errors.New("当前生成不支持带字典依赖的字段")
 			}
 			var rules map[string]any
 			_ = json.Unmarshal([]byte(field.UIRules), &rules)

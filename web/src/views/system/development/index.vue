@@ -93,7 +93,7 @@
                   <el-button type="warning" size="small" :disabled="!verifiedRelease || !targetId || !!action" :loading="action === 'deploy'" @click="deployRelease">部署此发布版本</el-button>
                 </div>
                 <p v-if="!targets.length" class="muted">当前项目没有可用部署目标。</p>
-                <el-alert v-if="deployment" :type="deployment.status === 'succeeded' ? 'success' : 'info'" :closable="false" :title="'部署状态：' + deployment.status + '；版本 ' + deployment.releaseId + '；目标 ' + deployment.targetId" />
+                <el-alert v-if="deployment" :type="deployment.status === 'deployed' ? 'success' : 'info'" :closable="false" :title="'部署状态：' + deployment.status + '；版本 ' + deployment.releaseId + '；目标 ' + deployment.targetId" />
                 <a v-if="deploymentUrl" :href="deploymentUrl" target="_blank" rel="noopener noreferrer">打开已部署应用</a>
                 <CredentialsPanel v-if="deploymentCredentials" title="已部署应用" :credentials="deploymentCredentials" />
                 <p v-else-if="deploymentUrl" class="muted">本次未返回新登录信息，请使用此前保存的账号。</p>
@@ -124,7 +124,7 @@ import { listAiAgents } from '@/api/ai'
 import type { AiAgentItem } from '@/api/ai'
 import { buildDevRelease, cancelDevRun, createDevProject, createDevRun, deployDevRelease, downloadDevRelease, getDevRun, listDevProjects, listDevRuns, listDevTargets, previewDevRelease } from '@/api/development'
 import type { DevCredentials, DevDeployment, DevProject, DevRun, DevRunDetail, DevRunEvent, DevTarget } from '@/api/development'
-import { canBuildRelease, canCancelRun, canUseRelease, isRunPending, mergeRunEvents, phaseLabel, prettyReport, readCheckReport, readSavedSelection, runLabel, safeHttpUrl, validateProject, validateRun } from './state'
+import { canBuildRelease, canCancelRun, canUseRelease, isDeployedResult, isRunPending, mergeRunEvents, phaseLabel, prettyReport, readCheckReport, readSavedSelection, runLabel, safeHttpUrl, validateProject, validateRun } from './state'
 import CredentialsPanel from './CredentialsPanel.vue'
 
 const SELECTION_KEY = 'fde-development-selection'
@@ -368,9 +368,11 @@ async function downloadRelease(): Promise<void> {
 
 async function previewRelease(): Promise<void> {
   if (!detail.value?.release || !projectId.value || !verifiedRelease.value || action.value) return
+  const releaseId = detail.value.release.id
   action.value = 'preview'; actionError.value = ''; previewUrl.value = ''; previewCredentials.value = null
   try {
-    const preview = await previewDevRelease(projectId.value, detail.value.release.id)
+    const preview = await previewDevRelease(projectId.value, releaseId)
+    if (!isDeployedResult(preview, releaseId)) throw new Error('预览尚未部署成功：' + preview.status)
     previewUrl.value = safeHttpUrl(preview.url)
     previewCredentials.value = preview.credentials ?? null
     if (!previewUrl.value) throw new Error('预览未返回可访问地址，请查看执行记录')
@@ -391,6 +393,7 @@ async function deployRelease(): Promise<void> {
   action.value = 'deploy'; actionError.value = ''; deployment.value = null; deploymentCredentials.value = null
   try {
     const { credentials, ...metadata } = await deployDevRelease(selectedProjectId, releaseId, selectedTarget.id)
+    if (!isDeployedResult(metadata, releaseId, selectedTarget.id)) throw new Error('目标部署未完成：' + metadata.status)
     deployment.value = metadata
     deploymentCredentials.value = credentials ?? null
   } catch (error) { actionError.value = (error as Error).message || '部署失败' }

@@ -11,7 +11,12 @@
 API 前后端契约：docs/api-conventions.md（响应信封/业务码/鉴权/分页/错误处理约定）。
 AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Agent Framework for Go）。
 分阶段改造计划：[内置智能体业务开发与交付路线图](docs/agent-delivery-roadmap.md)。
-当前改造说明：[P0 开发契约与工作区](docs/agent-delivery-p0.md)。
+当前改造说明：[P1 内置智能体首次开发与交付](docs/agent-delivery-p1.md)。
+历史记录：[P0 开发契约与客户工作区](docs/agent-delivery-p0.md)。
+
+P1 入口为“系统管理 → 开发工作台”：创建客户项目、选择智能体、提交需求，后台在独立工作区生成新模块并运行固定检查，再由用户审阅、打包和显式预览/首次部署。使用前先执行 `go run ./cmd/fde prepare-image`；具体操作、Linux/SQLite 首次安装范围和验证记录见 P1 说明。
+
+下方保留原脚手架工作台及兼容生成器用法。工作台默认/显式 `workbench` 才初始化并启动 worker；交付应用使用 `bootstrap` 首次安装及带 manifest 的 `serve`，普通 `serve` 不执行 AutoMigrate。已有业务增量修改与不同版本升级仍属 P2。
 
 ## 技术栈
 

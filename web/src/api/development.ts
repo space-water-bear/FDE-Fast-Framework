@@ -1,4 +1,5 @@
 import request from '@/utils/request'
+import { releaseDownloadName } from '@/utils/download'
 
 export interface DevProject {
   id: number
@@ -150,7 +151,7 @@ export async function downloadDevRelease(projectId: number, releaseId: string): 
   const url = URL.createObjectURL(await response.blob())
   const link = document.createElement('a')
   link.href = url
-  link.download = 'fde-release-' + releaseId + '.tar.gz'
+  link.download = releaseDownloadName(response.headers.get('content-disposition'), releaseId)
   link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }

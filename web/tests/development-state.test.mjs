@@ -8,7 +8,7 @@ const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 })
 const { runLabel, canCancelRun, canBuildRelease, canUseRelease, isRunPending, mergeRunEvents,
-  readCheckReport, prettyReport, readSavedSelection, safeHttpUrl, validateProject, validateRun } =
+  readCheckReport, prettyReport, readSavedSelection, safeHttpUrl, isDeployedResult, validateProject, validateRun } =
   await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
 test('queued/running/cancel-requested task states never imply successful completion', () => {
@@ -85,6 +85,27 @@ test('preview and deployment links allow only explicit HTTP/HTTPS URLs', () => {
   assert.equal(safeHttpUrl('javascript:alert(1)'), '')
   assert.equal(safeHttpUrl('data:text/html,hello'), '')
   assert.equal(safeHttpUrl('/relative-url'), '')
+})
+
+test('preview/deployment success requires the exact requested release and target, not HTTP success alone', () => {
+  const result = { status: 'deployed', releaseId: 'release-a', targetId: 'target-a' }
+  assert.equal(isDeployedResult(result, 'release-a'), true)
+  assert.equal(isDeployedResult(result, 'release-a', 'target-a'), true)
+  assert.equal(isDeployedResult({ ...result, status: 'failed' }, 'release-a'), false)
+  assert.equal(isDeployedResult({ ...result, status: 'ready' }, 'release-a'), false)
+  assert.equal(isDeployedResult(result, 'release-b'), false)
+  assert.equal(isDeployedResult(result, 'release-a', 'target-b'), false)
+})
+
+test('release downloads retain the server ZIP filename and safely handle encoded or invalid headers', async () => {
+  const downloadSource = await readFile(new URL('../src/utils/download.ts', import.meta.url), 'utf8')
+  const compiled = ts.transpileModule(downloadSource, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText
+  const { releaseDownloadName } = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'))
+  assert.equal(releaseDownloadName('attachment; filename="fde-release-1.zip"', 'r1'), 'fde-release-1.zip')
+  assert.equal(releaseDownloadName("attachment; filename*=UTF-8''%E5%8F%91%E5%B8%83.zip", 'r1'), '发布.zip')
+  assert.equal(releaseDownloadName('attachment; filename="../private/release.zip"', 'r1'), 'release.zip')
+  assert.equal(releaseDownloadName(null, 'r1'), 'fde-release-r1.zip')
+  assert.equal(releaseDownloadName('attachment; filename=".."', 'r1'), 'fde-release-r1.zip')
 })
 
 test('project/task inputs obey server naming and UTF-8 requirement limits', () => {

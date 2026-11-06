@@ -72,6 +72,11 @@ export function safeHttpUrl(value?: string): string {
   } catch { return '' }
 }
 
+export function isDeployedResult(result: { status: string; releaseId: string; targetId?: string }, releaseId: string, targetId?: string): boolean {
+  return result.status === 'deployed' && result.releaseId === releaseId
+    && (targetId === undefined || result.targetId === targetId)
+}
+
 export function validateProject(key: string, name: string): string {
   if (!/^[a-z][a-z0-9-]{0,47}$/.test(key)) return '项目标识需以小写字母开头，最多 48 位，仅包含小写字母、数字和连字符'
   if (!name.trim() || Array.from(name.trim()).length > 128) return '请填写不超过 128 字的项目名称'

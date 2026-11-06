@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"fde-admin/internal/global"
 	"fde-admin/internal/model"
 )
 
@@ -109,5 +110,24 @@ func TestDevelopmentSnapshotDoesNotCountFrozenRequirementAsAgentCode(t *testing.
 	diff, after, err := DevelopmentRunSnapshot(context.Background(), run)
 	if err != nil || !strings.Contains(diff, "BusinessChanged") || strings.Contains(diff, "host frozen") || after == before {
 		t.Fatalf("business source change was not captured: %q %v", diff, err)
+	}
+}
+
+func TestDevelopmentGeneratorRejectsUnsupportedLinkedDraftWithoutLosingRules(t *testing.T) {
+	scope, _, repo := setupDevelopmentRunTest(t)
+	if err := global.DB.AutoMigrate(&model.BizObject{}, &model.BizField{}, &model.FormSchema{}); err != nil {
+		t.Fatal(err)
+	}
+	input := FormgenObjectInput{ObjectKey: "biz_linked", Name: "联动对象", Fields: []FormgenField{{Name: "active", Title: "启用", Type: "bool", InForm: true}, {Name: "name", Title: "名称", Type: "string", InForm: true}}, Linkages: []FormgenLinkage{{When: map[string]any{"field": "active", "eq": true}, Then: map[string]any{"field": "name", "required": true}}}}
+	saved, err := CreateBizObjectInProject(scope.ProjectID, input, scope.ActorID)
+	if err != nil || !saved.OK {
+		t.Fatalf("draft fixture invalid: %+v %v", saved, err)
+	}
+	run := model.DevRun{ProjectID: scope.ProjectID, ActorID: scope.ActorID, WorkspacePath: repo}
+	if _, err := generateDevelopmentBusiness(context.Background(), run, `{"objectKey":"biz_linked"}`); err == nil || !strings.Contains(err.Error(), "联动") {
+		t.Fatal("generator silently discarded linkage rules")
+	}
+	if _, err := os.Stat(filepath.Join(repo, "server/internal/model/linked.go")); !os.IsNotExist(err) {
+		t.Fatal("unsupported draft wrote files before rejection")
 	}
 }
