@@ -1,0 +1,69 @@
+name: Framework checks
+
+on:
+  push:
+    branches: [main, 'codex/**']
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      docker_acceptance:
+        description: Run real isolated Linux first-delivery acceptance
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: server/go.sum
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./...
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: '22.22.3'
+          package-manager-cache: false
+      - run: npm install --global pnpm@11.23.0
+      - run: pnpm install --frozen-lockfile --ignore-scripts --ignore-pnpmfile
+      - run: pnpm test
+      - run: pnpm build
+
+  docker-first-delivery:
+    if: github.event_name == 'workflow_dispatch' && inputs.docker_acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: '1.26.0'
+          cache-dependency-path: server/go.sum
+      - run: go run ./cmd/fde prepare-image --output /tmp/fde-runner-image
+      - run: FDE_RUN_DOCKER_ACCEPTANCE=1 go test ./internal/service -run '^TestDevelopmentDockerFirstDelivery$' -count=1 -v -timeout 35m

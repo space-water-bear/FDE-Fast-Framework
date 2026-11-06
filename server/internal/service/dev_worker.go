@@ -140,12 +140,12 @@ func claimNextDevelopmentRun() (*model.DevRun, error) {
 	var claimed *model.DevRun
 	err := global.DB.Transaction(func(tx *gorm.DB) error {
 		var run model.DevRun
-		err := tx.Where("state = ? AND NOT EXISTS (SELECT 1 FROM sys_dev_runs AS busy WHERE busy.project_id = sys_dev_runs.project_id AND busy.state = ?)", "queued", "running").Order("id asc").First(&run).Error
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil
+		resultQuery := tx.Where("state = ? AND NOT EXISTS (SELECT 1 FROM sys_dev_runs AS busy WHERE busy.project_id = sys_dev_runs.project_id AND busy.state = ?)", "queued", "running").Order("id asc").Limit(1).Find(&run)
+		if resultQuery.Error != nil {
+			return resultQuery.Error
 		}
-		if err != nil {
-			return err
+		if resultQuery.RowsAffected == 0 {
+			return nil
 		}
 		var project model.DevProject
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&project, run.ProjectID).Error; err != nil {

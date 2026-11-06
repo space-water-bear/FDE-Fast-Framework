@@ -141,8 +141,17 @@ func TestPassingProfileRequiresArtifactsAndRecordsImageIdentity(t *testing.T) {
 		t.Fatalf("passing profile incomplete: %+v %v", report, err)
 	}
 	for _, c := range e.calls {
+		if strings.HasSuffix(c.LogPath, "typescript.log") || strings.HasSuffix(c.LogPath, "vite-build.log") {
+			args := strings.Join(c.Args, " ")
+			if strings.Contains(args, "pnpm exec") || !strings.Contains(args, "node node_modules/") {
+				t.Fatal("offline checks must not invoke pnpm automatic dependency installation")
+			}
+		}
 		if strings.HasSuffix(c.LogPath, "go-test.log") {
 			args := strings.Join(c.Args, " ")
+			if !strings.Contains(args, "/tmp:rw,exec,nosuid,nodev,size=1g") {
+				t.Fatal("Go test binaries require the isolated executable temporary filesystem")
+			}
 			if !strings.Contains(args, "--network none") || !strings.Contains(args, "dst=/out,readonly") || !strings.Contains(args, "dst=/go,readonly") {
 				t.Fatalf("test container can mutate verified outputs/dependencies: %s", args)
 			}

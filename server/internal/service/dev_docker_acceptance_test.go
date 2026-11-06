@@ -157,7 +157,7 @@ func TestDevelopmentDockerFirstDelivery(t *testing.T) {
 	}
 	finished, _, err := GetDevRun(scope, run.Key)
 	if err != nil || finished.State != "succeeded" || finished.Attempts != 2 {
-		t.Fatalf("task did not pass: %+v %v; evidence=%s", finished, err, root)
+		t.Fatalf("task did not pass: state=%s attempts=%d error=%s (%v); evidence=%s", finished.State, finished.Attempts, finished.Error, err, root)
 	}
 	release, err := CreateDevelopmentRelease(ctx, scope, run.Key)
 	if err != nil {

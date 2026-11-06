@@ -137,8 +137,8 @@ func (r *Runner) Check(ctx context.Context, req Request) (report Report, retErr 
 		{"go-build", "server", "none", []string{"go", "build", "-trimpath", "-o", "/out/server", "."}, ""},
 		{"cli-build", "server", "none", []string{"go", "build", "-trimpath", "-o", "/out/fde", "./cmd/fde"}, ""},
 		{"web-test", "web", "none", []string{"node", "--test"}, ""},
-		{"typescript", "web", "none", []string{"pnpm", "exec", "vue-tsc", "--noEmit"}, ""},
-		{"vite-build", "web", "none", []string{"pnpm", "exec", "vite", "build", "--outDir", "/out/web"}, ""},
+		{"typescript", "web", "none", []string{"node", "node_modules/vue-tsc/bin/vue-tsc.js", "--noEmit"}, ""},
+		{"vite-build", "web", "none", []string{"node", "node_modules/vite/bin/vite.js", "build", "--outDir", "/out/web"}, ""},
 	}
 	for i, step := range checks {
 		name := "fde-check-" + strings.ReplaceAll(report.ID, "-", "") + "-" + strconv.Itoa(i)
