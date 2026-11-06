@@ -1,6 +1,6 @@
 <template>
   <div class="form-render">
-    <el-form :model="formModel" :rules="formRules" :label-width="labelWidth">
+    <el-form ref="elementForm" :model="formModel" :rules="formRules" :label-width="labelWidth">
       <el-row :gutter="16">
         <el-col v-for="entry in fieldEntries" :key="entry.name" :span="entry.colSpan">
           <el-form-item v-show="linkageState.visible[entry.name] !== false" :label="entry.title" :prop="entry.name">
@@ -178,6 +178,12 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: Record<string, any>): void
 }>()
 
+const elementForm = ref<{ validate: () => Promise<boolean>; clearValidate: () => void }>()
+defineExpose({
+  validate: () => elementForm.value?.validate() ?? Promise.resolve(false),
+  clearValidate: () => elementForm.value?.clearValidate(),
+})
+
 const fieldOptionsMap = ref<Record<string, FormOption[]>>({})
 const linkageState = reactive<LinkageState>(buildLinkageState(props.schema, props.modelValue ?? {}))
 const tableSelectField = ref<string | null>(null)
@@ -187,7 +193,10 @@ const tableSelectKeyword = ref('')
 const formModel = computed(() => props.modelValue ?? {})
 
 const fieldEntries = computed<FieldEntry[]>(() =>
-  Object.entries(props.schema.fields ?? {}).map(([name, field]) => {
+  Object.entries(props.schema.fields ?? {})
+    .filter(([, field]) => field['x-fde']?.inForm !== false)
+    .sort((a, b) => (a[1]['x-fde']?.sort ?? 0) - (b[1]['x-fde']?.sort ?? 0))
+    .map(([name, field]) => {
     const meta = resolveControl(field)
     const xui = field['x-ui'] ?? {}
     return {

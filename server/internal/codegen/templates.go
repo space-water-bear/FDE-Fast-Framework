@@ -72,10 +72,11 @@ import (
 	"fde-admin/internal/model"
 	"fde-admin/internal/service"
 	"fde-admin/internal/utils"
+[[if .SchemaDriven]]"fde-admin/internal/global"[[end]]
 )
 
 type [[.Snake]]ListQuery struct {
-[[range .SearchFields]]	[[.FieldName]] [[.GoSearchType]] [[printf "%c" 96]]form:"[[.ColumnName]]"[[printf "%c" 96]]
+[[range .SearchFields]]	[[.FieldName]] [[.GoSearchType]] [[printf "%c" 96]]form:"[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]]"[[printf "%c" 96]]
 [[end]]}
 
 func List[[.StructName]]s(c *gin.Context) {
@@ -95,7 +96,7 @@ func List[[.StructName]]s(c *gin.Context) {
 
 func Create[[.StructName]](c *gin.Context) {
 	var m model.[[.StructName]]
-	if err := c.ShouldBindJSON(&m); err != nil {
+	if err := utils.BindBusinessJSON(c, &m, [[if .SchemaDriven]]global.GeneratedBusinessSchemaJSON("[[.ObjectKey]]")[[else]][[.SchemaLiteral]][[end]]); err != nil {
 		utils.Fail(c, "参数错误")
 		return
 	}
@@ -113,7 +114,7 @@ func Update[[.StructName]](c *gin.Context) {
 		return
 	}
 	var m model.[[.StructName]]
-	if err := c.ShouldBindJSON(&m); err != nil {
+	if err := utils.BindBusinessJSON(c, &m, [[if .SchemaDriven]]global.GeneratedBusinessSchemaJSON("[[.ObjectKey]]")[[else]][[.SchemaLiteral]][[end]]); err != nil {
 		utils.Fail(c, "参数错误")
 		return
 	}
@@ -144,10 +145,12 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"fde-admin/internal/api"
+[[if .SchemaDriven]]"fde-admin/internal/global"[[end]]
 )
 
 func init() {
 	RegisterGenerated(register[[.StructName]])
+[[if .SchemaDriven]]global.RegisterGeneratedBusiness(global.BusinessRegistration{ObjectKey:"[[.ObjectKey]]",TableName:"[[.TableName]]",Path:"[[.Snake]]",Name:"[[.StructName]]",Component:"generated/[[.Snake]]/index",SchemaJSON:[[.SchemaLiteral]]})[[end]]
 }
 
 func register[[.StructName]](g *gin.RouterGroup) {
@@ -237,7 +240,9 @@ const vueTpl = `<template>
     </div>
 
     <el-dialog v-model="dialogVisible" :title="editingId ? '编辑[[.Business]]' : '新增[[.Business]]'" width="560px" destroy-on-close>
-      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
+[[if .SchemaDriven]]      <FormRender v-if="businessSchema" ref="formRef" :schema="businessSchema" :model-value="form" @update:model-value="Object.assign(form, $event)" />
+      <el-alert v-else title="业务表单尚未初始化，请检查发布包安装结果" type="error" :closable="false" />
+[[else]]      <el-form ref="formRef" :model="form" :rules="rules" label-width="110px">
 [[range .FormFields]][[if eq .FormControl "input"]]        <el-form-item label="[[.Title]]" prop="[[.JSONName]]">
           <el-input v-model="form.[[.JSONName]]" placeholder="请输入[[.Title]]" />
         </el-form-item>
@@ -254,7 +259,7 @@ const vueTpl = `<template>
           <el-date-picker v-model="form.[[.JSONName]]" type="datetime" value-format="YYYY-MM-DDTHH:mm:ssZ" placeholder="请选择[[.Title]]" style="width: 100%" />
         </el-form-item>
 [[end]][[end]]      </el-form>
-      <template #footer>
+[[end]]      <template #footer>
         <el-button @click="dialogVisible = false">取消</el-button>
         <el-button type="primary" :loading="saving" @click="handleSave">保存</el-button>
       </template>
@@ -265,7 +270,11 @@ const vueTpl = `<template>
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import type { FormInstance, FormRules } from 'element-plus'
+[[if .SchemaDriven]]import FormRender from '@/components/form-render/FormRender.vue'
+import type { FormSchema } from '@/components/form-render/types'
+import request from '@/utils/request'
+[[else]]import type { FormInstance, FormRules } from 'element-plus'
+[[end]]
 import { Plus[[if .SearchFields]], Refresh, Search[[end]] } from '@element-plus/icons-vue'
 import { create[[.StructName]], delete[[.StructName]], list[[.StructName]]s, update[[.StructName]] } from '@/api/[[.Snake]]'
 import type { [[.StructName]]Item } from '@/api/[[.Snake]]'
@@ -283,23 +292,28 @@ const query = reactive<Record<string, any>>({
 const dialogVisible = ref(false)
 const editingId = ref<number | null>(null)
 const saving = ref(false)
-const formRef = ref<FormInstance>()
+[[if .SchemaDriven]]const formRef = ref<InstanceType<typeof FormRender>>()
+const businessSchema = ref<FormSchema>()
+[[else]]const formRef = ref<FormInstance>()
+[[end]]
 
 const form = reactive<Record<string, any>>({
 [[range .FormFields]]  [[.JSONName]]: [[.TsDefault]],
 [[end]]})
 
-const rules: FormRules = {
+
+[[if not .SchemaDriven]]const rules: FormRules = {
 [[range .FormFields]][[if .Required]]  [[.JSONName]]: [{ required: true, message: '请填写[[.Title]]', trigger: 'blur' }],
 [[end]][[end]]}
 
+[[end]]
 function buildParams() {
   const params: Record<string, any> = { page: query.page, pageSize: query.pageSize }
 [[range .SearchFields]][[if eq .TsType "number"]]  if (query.[[.JSONName]] !== null && query.[[.JSONName]] !== undefined) {
-    params.[[.JSONName]] = query.[[.JSONName]]
+    params.[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]] = query.[[.JSONName]]
   }
 [[else]]  if (query.[[.JSONName]]) {
-    params.[[.JSONName]] = query.[[.JSONName]]
+    params.[[if $.SchemaDriven]][[.JSONName]][[else]][[.ColumnName]][[end]] = query.[[.JSONName]]
   }
 [[end]][[end]]  return params
 }
@@ -363,6 +377,9 @@ function handleDelete(row: [[.StructName]]Item) {
     .catch(() => {})
 }
 
-onMounted(load)
+[[if .SchemaDriven]]onMounted(async () => {
+  businessSchema.value = await request.get<any, FormSchema>('/biz/schema/[[.ObjectKey]]')
+  await load()
+})[[else]]onMounted(load)[[end]]
 </script>
 `

@@ -39,6 +39,12 @@ func (w *captureWriter) WriteString(s string) (int, error) {
 	return w.ResponseWriter.WriteString(s)
 }
 
+// Replay only the sampled prefix, then continue from the untouched request body.
+type loggedRequestBody struct {
+	io.Reader
+	io.Closer
+}
+
 // OperationLog 操作日志中间件: 记录方法/路径/用户/耗时/状态码/请求体(脱敏)
 func OperationLog() gin.HandlerFunc {
 	return func(c *gin.Context) {
@@ -52,7 +58,7 @@ func OperationLog() gin.HandlerFunc {
 		body := ""
 		if c.Request.Body != nil {
 			raw, _ := io.ReadAll(io.LimitReader(c.Request.Body, maxLogBody))
-			c.Request.Body = io.NopCloser(bytes.NewReader(raw))
+			c.Request.Body = &loggedRequestBody{Reader: io.MultiReader(bytes.NewReader(raw), c.Request.Body), Closer: c.Request.Body}
 			body = maskRe.ReplaceAllString(string(raw), `"$1":"***"`)
 		}
 

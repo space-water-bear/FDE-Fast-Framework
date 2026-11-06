@@ -2,21 +2,35 @@ package config
 
 import (
 	"os"
+	"runtime"
 	"strconv"
 
 	"gopkg.in/yaml.v3"
 )
 
 type Config struct {
-	App     App     `yaml:"app"`
-	DB      DB      `yaml:"db"`
-	JWT     JWT     `yaml:"jwt"`
-	Seed    Seed    `yaml:"seed"`
-	Codegen Codegen `yaml:"codegen"`
-	Captcha Captcha `yaml:"captcha"`
-	Upload  Upload  `yaml:"upload"`
-	Zap     Zap     `yaml:"zap"`
-	MCP     MCP     `yaml:"mcp"`
+	App         App         `yaml:"app"`
+	DB          DB          `yaml:"db"`
+	JWT         JWT         `yaml:"jwt"`
+	Seed        Seed        `yaml:"seed"`
+	Codegen     Codegen     `yaml:"codegen"`
+	Captcha     Captcha     `yaml:"captcha"`
+	Upload      Upload      `yaml:"upload"`
+	Zap         Zap         `yaml:"zap"`
+	MCP         MCP         `yaml:"mcp"`
+	Development Development `yaml:"development"`
+	Runtime     Runtime     `yaml:"-"`
+}
+
+type Runtime struct{ ManifestPath, WebDir, ReleaseID, SourceHash string }
+
+type Development struct {
+	WorkspaceDir string `yaml:"workspace-dir"`
+	TemplateRepo string `yaml:"template-repo"`
+	TemplateRef  string `yaml:"template-ref"`
+	ReleaseDir   string `yaml:"release-dir"`
+	TargetDir    string `yaml:"target-dir"`
+	TargetArch   string `yaml:"target-arch"`
 }
 
 type App struct {
@@ -118,6 +132,21 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Codegen.WebDir == "" {
 		cfg.Codegen.WebDir = "../web"
+	}
+	if cfg.Development.WorkspaceDir == "" {
+		cfg.Development.WorkspaceDir = "./data/workspaces"
+	}
+	if cfg.Development.TemplateRef == "" {
+		cfg.Development.TemplateRef = "HEAD"
+	}
+	if cfg.Development.ReleaseDir == "" {
+		cfg.Development.ReleaseDir = "./data/releases"
+	}
+	if cfg.Development.TargetDir == "" {
+		cfg.Development.TargetDir = "./data/test-targets"
+	}
+	if cfg.Development.TargetArch == "" {
+		cfg.Development.TargetArch = runtime.GOARCH
 	}
 	return cfg, nil
 }

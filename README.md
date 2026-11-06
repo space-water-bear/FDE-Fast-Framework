@@ -10,6 +10,13 @@
 前端通用组件文档：docs/components/table-page.md（表格页组件：左树 + 搜索表单 + vxe-grid 表格）。
 API 前后端契约：docs/api-conventions.md（响应信封/业务码/鉴权/分页/错误处理约定）。
 AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Agent Framework for Go）。
+分阶段改造计划：[内置智能体业务开发与交付路线图](docs/agent-delivery-roadmap.md)。
+当前改造说明：[P1 内置智能体首次开发与交付](docs/agent-delivery-p1.md)。
+历史记录：[P0 开发契约与客户工作区](docs/agent-delivery-p0.md)。
+
+P1 入口为“系统管理 → 开发工作台”：创建客户项目、选择智能体、提交需求，后台在独立工作区生成新模块并运行固定检查，再由用户审阅、打包和显式预览/首次部署。使用前先执行 `go run ./cmd/fde prepare-image`；具体操作、Linux/SQLite 首次安装范围和验证记录见 P1 说明。
+
+下方保留原脚手架工作台及兼容生成器用法。工作台默认/显式 `workbench` 才初始化并启动 worker；交付应用使用 `bootstrap` 首次安装及带 manifest 的 `serve`，普通 `serve` 不执行 AutoMigrate。已有业务增量修改与不同版本升级仍属 P2。
 
 ## 技术栈
 
@@ -218,7 +225,7 @@ FDE_CAPTCHA_ENABLED、FDE_JWT_USE_MULTIPOINT。
 
     1. 填写表名(如 biz_customer)、业务名称(如 客户)、选择父菜单(不选则生成顶级菜单)
     2. 添加字段：字段名(列名)、中文名、类型，勾选 查询/列表/表单/必填
-    3. 点击「预览」查看将要生成的代码，点击「生成代码」写入源码
+    3. 点击「预览」查看本批次代码，确认后点击「应用此预览」；修改参数后需要重新预览
     4. 重启后端服务(go run .)，刷新页面，新菜单出现在侧边栏即可使用
 
 字段类型与前端控件：
@@ -249,6 +256,10 @@ casbin 策略随之重建。生成器会校验表名/字段名合法性，并禁
     - 同一张表只能生成一次（表已存在或菜单同名会被拒绝）；若要重新生成，先删除对应菜单并清掉数据表
     - 结构体名由表名自动推导（去掉 sys_/biz_/t_ 前缀转大驼峰），如 biz_customer -> Customer
     - 生成的是普通源码文件，可自由二次修改
+
+生成批次与当前用户、项目、对象版本及文件基线绑定，30 分钟内有效；文件发生变化会拒绝覆盖。
+内置智能体和 MCP 的 `apply_files` 返回待人工确认提示，模型填写 `approve=true` 不会授权写入。
+表单编辑保存为草稿，运行端读取已激活版本；草稿保存、版本激活和代码生成是独立操作。
 
 ## 二次开发指引
 

@@ -1,7 +1,12 @@
 package router
 
 import (
+	"fde-admin/internal/initialize"
 	"github.com/gin-gonic/gin"
+	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 
 	"fde-admin/internal/api"
 	"fde-admin/internal/global"
@@ -16,9 +21,16 @@ func NewRouter() *gin.Engine {
 	r.Static("/uploads", global.Config.Upload.Dir)
 
 	r.GET("/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(200, gin.H{"status": "ok", "releaseId": global.Config.Runtime.ReleaseID, "sourceHash": global.Config.Runtime.SourceHash})
 	})
 
+	r.GET("/ready", func(c *gin.Context) {
+		if err := initialize.RuntimeReadiness(global.Config.Runtime.ManifestPath); err != nil {
+			c.JSON(503, gin.H{"status": "not_ready", "error": err.Error()})
+			return
+		}
+		c.JSON(200, gin.H{"status": "ready", "releaseId": global.Config.Runtime.ReleaseID, "sourceHash": global.Config.Runtime.SourceHash})
+	})
 	apiGroup := r.Group("/api")
 
 	// API 统一禁止缓存: 认证/菜单等数据必须实时获取
@@ -58,16 +70,33 @@ func NewRouter() *gin.Engine {
 		authed.PUT("/menu/:id", api.UpdateMenu)
 		authed.DELETE("/menu/:id", api.DeleteMenu)
 
-		authed.GET("/codegen/options", api.CodegenOptions)
-		authed.POST("/codegen/preview", api.CodegenPreview)
-		authed.POST("/codegen/generate", api.CodegenGenerate)
+		if global.Config.App.Mode != "release" {
+			authed.GET("/codegen/options", api.CodegenOptions)
+			authed.POST("/codegen/preview", api.CodegenPreview)
+			authed.POST("/codegen/generate", api.CodegenGenerate)
 
-		authed.GET("/formgen/objects", api.ListFormgenObjects)
-		authed.POST("/formgen/objects", api.CreateFormgenObject)
-		authed.PUT("/formgen/objects/:objectKey", api.UpdateFormgenObject)
-		authed.GET("/formgen/schema/:objectKey", api.GetFormgenSchema)
-		authed.POST("/formgen/schema/preview", api.PreviewFormgenSchema)
-		authed.POST("/formgen/apply", api.FormgenApply)
+			authed.GET("/formgen/objects", api.ListFormgenObjects)
+			authed.POST("/formgen/objects", api.CreateFormgenObject)
+			authed.PUT("/formgen/objects/:objectKey", api.UpdateFormgenObject)
+			authed.GET("/formgen/schema/:objectKey", api.GetFormgenSchema)
+			authed.POST("/formgen/schema/preview", api.PreviewFormgenSchema)
+			authed.POST("/formgen/apply", api.FormgenApply)
+			authed.POST("/formgen/objects/:objectKey/activate", api.ActivateFormgenObject)
+
+			authed.GET("/dev/projects", api.ListDevProjects)
+			authed.POST("/dev/projects", api.CreateDevProject)
+			authed.POST("/dev/runs", api.CreateDevRun)
+			authed.GET("/dev/runs", api.ListDevRuns)
+			authed.POST("/dev/runs/:key/release", api.CreateDevelopmentRelease)
+			authed.GET("/dev/releases/:releaseId", api.GetDevelopmentRelease)
+			authed.GET("/dev/releases/:releaseId/download", api.DownloadDevelopmentRelease)
+			authed.POST("/dev/releases/:releaseId/preview", api.PreviewDevelopmentRelease)
+			authed.POST("/dev/releases/:releaseId/deploy", api.DeployDevelopmentRelease)
+			authed.GET("/dev/targets", api.ListDevelopmentTargets)
+			authed.GET("/dev/runs/:key", api.GetDevRun)
+			authed.POST("/dev/runs/:key/cancel", api.CancelDevRun)
+		}
+		authed.GET("/biz/schema/:objectKey", api.GetBusinessSchema)
 
 		authed.GET("/dict/types", api.ListDictTypes)
 		authed.POST("/dict/type", api.CreateDictType)
@@ -131,15 +160,34 @@ func NewRouter() *gin.Engine {
 	}
 
 	// MCP 网关专用服务间端点: 仅 x-api-key 鉴权(不经 JWT+casbin), 供 cmd/mcp-gateway 调用
-	mcp := r.Group("/api/mcp", middleware.ApiKeyAuth())
-	{
-		mcp.POST("/formgen/schema/preview", api.PreviewFormgenSchema)
-		mcp.POST("/codegen/preview", api.CodegenPreview)
-		mcp.POST("/formgen/apply", api.FormgenApply)
+	if global.Config.App.Mode != "release" {
+		mcp := r.Group("/api/mcp", middleware.ApiKeyAuth())
+		{
+			mcp.POST("/formgen/schema/preview", api.PreviewFormgenSchema)
+			mcp.POST("/codegen/preview", api.CodegenPreview)
+			mcp.POST("/formgen/apply", api.FormgenApply)
+		}
+
 	}
 
 	// 代码生成器产出的业务路由(init 注册表自动挂载)
 	applyGenerated(authed)
 
+	if global.Config.Runtime.WebDir != "" {
+		root, _ := filepath.Abs(global.Config.Runtime.WebDir)
+		r.NoRoute(func(c *gin.Context) {
+			if c.Request.Method != http.MethodGet || strings.HasPrefix(c.Request.URL.Path, "/api/") {
+				c.Status(404)
+				return
+			}
+			clean := filepath.Clean("/" + c.Request.URL.Path)
+			target := filepath.Join(root, clean)
+			if info, err := os.Stat(target); err == nil && !info.IsDir() {
+				c.File(target)
+				return
+			}
+			c.File(filepath.Join(root, "index.html"))
+		})
+	}
 	return r
 }

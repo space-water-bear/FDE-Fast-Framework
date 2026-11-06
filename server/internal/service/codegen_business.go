@@ -11,6 +11,8 @@ import (
 	"path"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
@@ -67,16 +69,27 @@ type CodegenMenuPlan struct {
 	TableName    string              `json:"tableName"`
 }
 
+// CodegenFileBaseline 固定预览时的文件状态；不存在也是必须验证的状态。
+type CodegenFileBaseline struct {
+	Path   string `json:"path"`
+	Exists bool   `json:"exists"`
+	SHA256 string `json:"sha256,omitempty"`
+}
+
 // BusinessCodeResult generate_business_code 返回结构(设计文档 6.2)
 type BusinessCodeResult struct {
-	OK              bool                 `json:"ok"`
-	BatchID         string               `json:"batchId,omitempty"`
-	Files           []codegen.FileResult `json:"files,omitempty"`
-	Diff            *CodegenDiff         `json:"diff,omitempty"`
-	MenuPlan        *CodegenMenuPlan     `json:"menuPlan,omitempty"`
-	RestartRequired bool                 `json:"restartRequired"`
-	Warnings        []string             `json:"warnings,omitempty"`
-	Error           *FormgenError        `json:"error,omitempty"`
+	OK              bool                  `json:"ok"`
+	BatchID         string                `json:"batchId,omitempty"`
+	Files           []codegen.FileResult  `json:"files,omitempty"`
+	Diff            *CodegenDiff          `json:"diff,omitempty"`
+	MenuPlan        *CodegenMenuPlan      `json:"menuPlan,omitempty"`
+	RestartRequired bool                  `json:"restartRequired"`
+	Warnings        []string              `json:"warnings,omitempty"`
+	Error           *FormgenError         `json:"error,omitempty"`
+	Baselines       []CodegenFileBaseline `json:"baselines,omitempty"`
+	ObjectVersion   int                   `json:"objectVersion,omitempty"`
+	RootHash        string                `json:"rootHash,omitempty"`
+	ExpiresAt       time.Time             `json:"expiresAt"`
 }
 
 // ApplyFilesInput apply_files 工具入参(设计文档 6.3)
@@ -103,7 +116,11 @@ type ApplyFilesResult struct {
 // ObjectToGenRequest 把 sys_biz_fields 投影为 codegen.GenField:
 // Type 取 string/text/int/float/bool/datetime 子集, enum/relation 跳过并记 warning
 func ObjectToGenRequest(objectKey string) ([]codegen.GenField, []string, error) {
-	_, fields, err := GetBizObjectByKey(objectKey)
+	return ObjectToGenRequestInProject(model.DefaultProjectID, objectKey)
+}
+
+func ObjectToGenRequestInProject(projectID uint, objectKey string) ([]codegen.GenField, []string, error) {
+	_, fields, err := GetBizObjectByKeyInProject(projectID, objectKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("业务对象不存在: %s", objectKey)
 	}
@@ -129,16 +146,24 @@ func ObjectToGenRequest(objectKey string) ([]codegen.GenField, []string, error) 
 
 // GenerateBusinessCode generate_business_code 工具执行函数(AiToolFunc 签名)
 func GenerateBusinessCode(ctx context.Context, args string) (any, error) {
-	return generateBusinessCode(args, 0)
+	scope, err := RequireEngineeringScope(ctx)
+	if err != nil {
+		return businessCodeFail("IDENTITY_REQUIRED", err.Error()), nil
+	}
+	return generateBusinessCode(args, scope)
 }
 
 // CodegenBusinessPreview HTTP /api/codegen/preview 带 objectKey 时复用工具实现
 func CodegenBusinessPreview(req codegen.GenRequest, userID uint) (*BusinessCodeResult, error) {
+	return CodegenBusinessPreviewInProject(req, userID, model.DefaultProjectID)
+}
+
+func CodegenBusinessPreviewInProject(req codegen.GenRequest, userID, projectID uint) (*BusinessCodeResult, error) {
 	b, err := json.Marshal(req)
 	if err != nil {
 		return nil, err
 	}
-	return generateBusinessCode(string(b), userID)
+	return generateBusinessCode(string(b), EngineeringScope{ActorID: userID, ProjectID: projectID})
 }
 
 // ApplyFiles apply_files 工具执行函数(AiToolFunc 签名)
@@ -147,12 +172,17 @@ func ApplyFiles(ctx context.Context, args string) (any, error) {
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return applyFilesFail("FORM_INVALID_SCHEMA", "参数不是合法 JSON: "+err.Error()), nil
 	}
-	return applyFilesCore(in, 0)
+	return applyFilesFail("APPROVAL_REQUIRED", "请在代码预览页面明确确认该批次；智能体参数不能批准写入宿主源码"), nil
 }
 
 // ApplyFormgenFiles HTTP /api/formgen/apply 与工具共用同一实现
 func ApplyFormgenFiles(in ApplyFilesInput, userID uint) (*ApplyFilesResult, error) {
-	return applyFilesCore(in, userID)
+	return ApplyFormgenFilesInProject(in, userID, model.DefaultProjectID)
+}
+
+// ApplyFormgenFilesInProject 只供已验证身份、项目权限及明确批次确认的 HTTP/人工入口调用。
+func ApplyFormgenFilesInProject(in ApplyFilesInput, userID, projectID uint) (*ApplyFilesResult, error) {
+	return applyFilesCore(in, EngineeringScope{ActorID: userID, ProjectID: projectID})
 }
 
 func businessCodeFail(errCode, msg string) *BusinessCodeResult {
@@ -167,25 +197,29 @@ func applyFilesFailWithRollback(errCode, msg string, rollback map[string]any) *A
 	return &ApplyFilesResult{OK: false, Error: &FormgenError{Code: 40001, ErrCode: errCode, Msg: msg}, Rollback: rollback}
 }
 
-// generateBusinessCode 解析工具入参并执行 dry-run(缺省)/apply(dryRun=false)
-func generateBusinessCode(args string, userID uint) (*BusinessCodeResult, error) {
+// generateBusinessCode 只生成预览；写盘必须经独立的人工确认入口。
+func generateBusinessCode(args string, scope EngineeringScope) (*BusinessCodeResult, error) {
+	if scope.ActorID == 0 || scope.ProjectID == 0 {
+		return businessCodeFail("IDENTITY_REQUIRED", "代码预览需要已验证的用户与项目身份"), nil
+	}
 	var in BusinessCodeInput
 	if err := json.Unmarshal([]byte(args), &in); err != nil {
 		return businessCodeFail("FORM_INVALID_SCHEMA", "参数不是合法 JSON: "+err.Error()), nil
 	}
-	dryRun := true
-	if in.DryRun != nil {
-		dryRun = *in.DryRun
+	if in.DryRun != nil && !*in.DryRun {
+		return businessCodeFail("APPROVAL_REQUIRED", "dryRun=false 不能批准写盘，请先预览再确认批次"), nil
 	}
 
 	var req codegen.GenRequest
 	warnings := make([]string, 0)
+	objectVersion := 0
 	if strings.TrimSpace(in.ObjectKey) != "" {
-		obj, _, err := GetBizObjectByKey(in.ObjectKey)
+		obj, _, err := GetBizObjectByKeyInProject(scope.ProjectID, in.ObjectKey)
 		if err != nil {
 			return businessCodeFail("FORM_INVALID_SCHEMA", "业务对象不存在: "+in.ObjectKey), nil
 		}
-		gfs, warns, err := ObjectToGenRequest(in.ObjectKey)
+		objectVersion = obj.Version
+		gfs, warns, err := ObjectToGenRequestInProject(scope.ProjectID, in.ObjectKey)
 		if err != nil {
 			return nil, err
 		}
@@ -219,15 +253,10 @@ func generateBusinessCode(args string, userID uint) (*BusinessCodeResult, error)
 	if err != nil {
 		return businessCodeFail("FORM_INVALID_SCHEMA", err.Error()), nil
 	}
-	if global.DB.Migrator().HasTable(req.TableName) {
-		return businessCodeFail("CODE_CONFLICT", "数据表已存在: "+req.TableName), nil
-	}
-	var menuCount int64
-	if err := global.DB.Model(&model.Menu{}).Where("path = ? AND name = ?", d.Snake, d.StructName).Count(&menuCount).Error; err != nil {
-		return nil, err
-	}
-	if menuCount > 0 {
-		return businessCodeFail("CODE_CONFLICT", "同名菜单已存在: "+d.Snake), nil
+	if scope.ProjectID == model.DefaultProjectID {
+		if err := checkLegacyCodegenConflict(&CodegenMenuPlan{TableName: req.TableName, Menu: CodegenMenuPlanItem{Path: d.Snake, Name: d.StructName}}); err != nil {
+			return businessCodeFail("CODE_CONFLICT", err.Error()), nil
+		}
 	}
 
 	files, err := codegen.Render(d)
@@ -235,7 +264,11 @@ func generateBusinessCode(args string, userID uint) (*BusinessCodeResult, error)
 		return businessCodeFail("FORM_INVALID_SCHEMA", err.Error()), nil
 	}
 
-	diff := computeGenDiff(files)
+	roots, err := loadCodegenRoots(scope.ProjectID)
+	if err != nil {
+		return businessCodeFail("WORKSPACE_REQUIRED", err.Error()), nil
+	}
+	diff, baselines := computeGenPlan(files, roots)
 	menuPlan := &CodegenMenuPlan{
 		Menu:         CodegenMenuPlanItem{Path: d.Snake, Title: d.Business, Name: d.StructName, Component: "generated/" + d.Snake + "/index"},
 		Buttons:      4,
@@ -246,29 +279,18 @@ func generateBusinessCode(args string, userID uint) (*BusinessCodeResult, error)
 	res := &BusinessCodeResult{
 		OK: true, BatchID: batchID, Files: files, Diff: diff, MenuPlan: menuPlan,
 		RestartRequired: true, Warnings: warnings,
+		Baselines: baselines, ObjectVersion: objectVersion, RootHash: roots.hash(),
+		ExpiresAt: time.Now().UTC().Add(codegenBatchTTL),
 	}
 
-	if err := persistDryRunAudit(batchID, in.ObjectKey, args, res, userID); err != nil {
+	if err := persistDryRunAudit(batchID, in.ObjectKey, args, res, scope); err != nil {
 		return nil, err
 	}
 
-	if !dryRun {
-		approve := true
-		applyRes, err := applyFilesCore(ApplyFilesInput{BatchID: batchID, ObjectKey: in.ObjectKey, Approve: &approve}, userID)
-		if err != nil {
-			return nil, err
-		}
-		if !applyRes.OK {
-			res = &BusinessCodeResult{
-				OK: false, BatchID: batchID, Files: files, Diff: diff, MenuPlan: menuPlan,
-				RestartRequired: true, Warnings: warnings, Error: applyRes.Error,
-			}
-		}
-	}
 	return res, nil
 }
 
-func persistDryRunAudit(batchID, objectKey, args string, res *BusinessCodeResult, userID uint) error {
+func persistDryRunAudit(batchID, objectKey, args string, res *BusinessCodeResult, scope EngineeringScope) error {
 	resultJSON, err := json.Marshal(res)
 	if err != nil {
 		return err
@@ -278,7 +300,8 @@ func persistDryRunAudit(batchID, objectKey, args string, res *BusinessCodeResult
 		return err
 	}
 	audit := model.GenAudit{
-		UserID:    userID,
+		UserID:    scope.ActorID,
+		ProjectID: scope.ProjectID,
 		Tool:      "generate_business_code",
 		Action:    "dry_run",
 		ObjectKey: objectKey,
@@ -296,195 +319,232 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// computeGenDiff 对比磁盘既有文件, 统计新增/修改/冲突
+// computeGenDiff 保留默认项目的只读兼容入口。
 func computeGenDiff(files []codegen.FileResult) *CodegenDiff {
+	roots, err := loadCodegenRoots(model.DefaultProjectID)
+	if err != nil {
+		return &CodegenDiff{Conflicts: []string{err.Error()}}
+	}
+	diff, _ := computeGenPlan(files, roots)
+	return diff
+}
+
+func computeGenPlan(files []codegen.FileResult, roots codegenRoots) (*CodegenDiff, []CodegenFileBaseline) {
 	diff := &CodegenDiff{Conflicts: []string{}}
+	baselines := make([]CodegenFileBaseline, 0, len(files))
 	for _, f := range files {
-		full, err := resolveGenFilePath(f.Path)
+		baseline, err := roots.baseline(f.Path)
 		if err != nil {
 			diff.Conflicts = append(diff.Conflicts, f.Path)
 			continue
 		}
-		_, statErr := os.Stat(full)
-		if errors.Is(statErr, os.ErrNotExist) {
+		baselines = append(baselines, baseline)
+		if !baseline.Exists {
 			diff.Added++
 			continue
 		}
-		if statErr != nil {
-			diff.Conflicts = append(diff.Conflicts, f.Path)
-			continue
-		}
-		modified, err := codegen.Diff(full, f.Content)
-		if err != nil {
-			diff.Conflicts = append(diff.Conflicts, f.Path)
-			continue
-		}
-		if modified {
+		if baseline.SHA256 != sha256Hex(f.Content) {
 			diff.Modified++
 			diff.Conflicts = append(diff.Conflicts, f.Path)
 		}
 	}
-	return diff
+	return diff, baselines
 }
 
-// applyFilesCore 两段式事务: 校验批次 -> 快照 -> 写盘 -> 菜单授权 -> casbin 重建 -> 审计
-func applyFilesCore(in ApplyFilesInput, userID uint) (*ApplyFilesResult, error) {
+const codegenBatchTTL = 30 * time.Minute
+
+// A single P0 process serializes host/workspace writes. The persistent CAS below
+// also prevents two requests/processes from claiming the same pending batch.
+var codegenApplyMu sync.Mutex
+
+func applyFilesCore(in ApplyFilesInput, scope EngineeringScope) (*ApplyFilesResult, error) {
+	if scope.ActorID == 0 || scope.ProjectID == 0 {
+		return applyFilesFail("IDENTITY_REQUIRED", "代码写入需要已验证的用户与项目身份"), nil
+	}
 	if strings.TrimSpace(in.BatchID) == "" {
-		return applyFilesFail("BATCH_STALE", "缺少 batchId"), nil
+		return applyFilesFail("BATCH_STALE", "请先预览并提供 batchId"), nil
 	}
 	if in.Approve == nil || !*in.Approve {
-		return applyFilesFail("BATCH_STALE", "approve 必须显式为 true 才执行写盘"), nil
+		return applyFilesFail("APPROVAL_REQUIRED", "必须明确确认已预览批次"), nil
 	}
+	if in.Snapshot != nil && !*in.Snapshot {
+		return applyFilesFail("SNAPSHOT_REQUIRED", "写入前必须保留恢复快照"), nil
+	}
+	if len(in.Files) != 0 || in.ParentMenuID != nil || in.ApplyMenu != nil {
+		return applyFilesFail("BATCH_STALE", "确认请求不能修改已预览的文件或菜单计划"), nil
+	}
+	codegenApplyMu.Lock()
+	defer codegenApplyMu.Unlock()
+
 	var audit model.GenAudit
-	if err := global.DB.Where("batch_id = ?", in.BatchID).First(&audit).Error; err != nil {
+	if err := global.DB.Where("batch_id = ? AND user_id = ? AND project_id = ?", in.BatchID, scope.ActorID, scope.ProjectID).First(&audit).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return applyFilesFail("BATCH_STALE", "批次不存在: "+in.BatchID), nil
+			return applyFilesFail("BATCH_STALE", "批次不存在或不属于当前用户/项目"), nil
 		}
 		return nil, err
 	}
 	if audit.Status != "pending" {
 		return applyFilesFail("BATCH_STALE", "批次已处理: "+audit.Status), nil
 	}
-
-	var dry BusinessCodeResult
-	if err := json.Unmarshal([]byte(audit.Result), &dry); err != nil {
-		return applyFilesFail("BATCH_STALE", "批次结果解析失败: "+err.Error()), nil
+	if audit.CreatedAt.IsZero() || time.Since(audit.CreatedAt) > codegenBatchTTL {
+		return applyFilesFail("BATCH_STALE", "批次已过期，请重新预览"), nil
 	}
-	files := dry.Files
-	if len(files) == 0 && strings.TrimSpace(audit.Files) != "" {
-		if err := json.Unmarshal([]byte(audit.Files), &files); err != nil {
-			return applyFilesFail("BATCH_STALE", "批次文件清单解析失败"), nil
+	if in.ObjectKey != "" && in.ObjectKey != audit.ObjectKey {
+		return applyFilesFail("BATCH_STALE", "对象与预览批次不一致"), nil
+	}
+	var dry BusinessCodeResult
+	if err := json.Unmarshal([]byte(audit.Result), &dry); err != nil || !dry.OK || dry.BatchID != in.BatchID {
+		return applyFilesFail("BATCH_STALE", "批次结果无效，请重新预览"), nil
+	}
+	if dry.Diff == nil || len(dry.Diff.Conflicts) != 0 {
+		return applyFilesFail("CODE_CONFLICT", "预览包含未解决的文件冲突，请先解决冲突并重新预览"), nil
+	}
+	if len(dry.Files) == 0 || len(dry.Baselines) != len(dry.Files) {
+		return applyFilesFail("BATCH_STALE", "批次缺少文件基线，请重新预览"), nil
+	}
+	roots, err := loadCodegenRoots(scope.ProjectID)
+	if err != nil {
+		return applyFilesFail("WORKSPACE_REQUIRED", err.Error()), nil
+	}
+	if dry.RootHash == "" || dry.RootHash != roots.hash() {
+		return applyFilesFail("BATCH_STALE", "代码输出目录已改变，请重新预览"), nil
+	}
+	if audit.ObjectKey != "" {
+		obj, _, err := GetBizObjectByKeyInProject(scope.ProjectID, audit.ObjectKey)
+		if err != nil || obj.Version != dry.ObjectVersion {
+			return applyFilesFail("BATCH_STALE", "业务规格已改变，请重新预览"), nil
 		}
 	}
-	if len(files) == 0 {
-		return applyFilesFail("BATCH_STALE", "批次缺少文件清单"), nil
-	}
-	for _, f := range files {
-		if err := validateGenFilePath(f.Path); err != nil {
+	for i, f := range dry.Files {
+		if dry.Baselines[i].Path != f.Path {
+			return applyFilesFail("BATCH_STALE", "文件基线与预览不一致"), nil
+		}
+		if err := roots.checkBaseline(dry.Baselines[i]); err != nil {
 			return applyFilesFail("CODE_CONFLICT", err.Error()), nil
 		}
 	}
-
-	// apply 阶段再查一次表/菜单冲突, 防止 dry-run 后并发变化
-	if dry.MenuPlan != nil {
-		if dry.MenuPlan.TableName != "" && global.DB.Migrator().HasTable(dry.MenuPlan.TableName) {
-			return applyFilesFail("CODE_CONFLICT", "数据表已存在: "+dry.MenuPlan.TableName), nil
-		}
-		var menuCount int64
-		if err := global.DB.Model(&model.Menu{}).Where("path = ? AND name = ?", dry.MenuPlan.Menu.Path, dry.MenuPlan.Menu.Name).Count(&menuCount).Error; err != nil {
-			return nil, err
-		}
-		if menuCount > 0 {
-			return applyFilesFail("CODE_CONFLICT", "同名菜单已存在: "+dry.MenuPlan.Menu.Path), nil
+	if scope.ProjectID == model.DefaultProjectID {
+		if err := checkLegacyCodegenConflict(dry.MenuPlan); err != nil {
+			return applyFilesFail("CODE_CONFLICT", err.Error()), nil
 		}
 	}
-
-	applyMenu := true
-	if in.ApplyMenu != nil {
-		applyMenu = *in.ApplyMenu
+	claim := global.DB.Model(&model.GenAudit{}).Where("id = ? AND user_id = ? AND project_id = ? AND status = ?", audit.ID, scope.ActorID, scope.ProjectID, "pending").Update("status", "applying")
+	if claim.Error != nil {
+		return nil, claim.Error
 	}
-	doSnapshot := true
-	if in.Snapshot != nil {
-		doSnapshot = *in.Snapshot
+	if claim.RowsAffected != 1 {
+		return applyFilesFail("BATCH_STALE", "批次已被其他请求处理"), nil
 	}
-	parentMenuID := uint(0)
-	if dry.MenuPlan != nil {
-		parentMenuID = dry.MenuPlan.ParentMenuID
+	audit.Status = "applying"
+	snap, err := takeGenSnapshotInRoots(in.BatchID, dry.Files, roots)
+	if err != nil {
+		_ = markAuditRolledBack(&audit, "SNAPSHOT_FAIL", err.Error(), err.Error())
+		return applyFilesFailWithRollback("SNAPSHOT_FAIL", "快照失败: "+err.Error(), map[string]any{"details": []string{err.Error()}}), nil
 	}
-	if in.ParentMenuID != nil {
-		parentMenuID = *in.ParentMenuID
-	}
-
-	var snap *genSnapshot
-	snapshotID := ""
-	if doSnapshot {
-		s, err := takeGenSnapshot(in.BatchID, files)
-		if err != nil {
-			_ = markAuditRolledBack(&audit, "SNAPSHOT_FAIL", err.Error(), err.Error())
-			return applyFilesFailWithRollback("SNAPSHOT_FAIL", "快照失败: "+err.Error(), map[string]any{"snapshotId": "", "details": []string{err.Error()}}), nil
-		}
-		snap = s
-		snapshotID = s.backupDir
-	}
-
-	applied := make([]map[string]any, 0, len(files))
-	for _, f := range files {
+	applied := make([]map[string]any, 0, len(dry.Files))
+	for i, f := range dry.Files {
 		if testWriteFailpoint != nil {
 			if err := testWriteFailpoint(f.Path); err != nil {
 				return rollbackApply(&audit, snap, 0, err, applied), nil
 			}
 		}
-		if err := writeGenFile(f); err != nil {
+		if err := roots.checkBaseline(dry.Baselines[i]); err != nil {
 			return rollbackApply(&audit, snap, 0, err, applied), nil
 		}
+		if err := roots.writeFile(f.Path, []byte(f.Content)); err != nil {
+			return rollbackApply(&audit, snap, 0, err, applied), nil
+		}
+		snap.written[f.Path] = sha256Hex(f.Content)
 		applied = append(applied, map[string]any{"path": f.Path, "status": "written"})
 	}
-
 	var menuID uint
-	if applyMenu && dry.MenuPlan != nil && dry.MenuPlan.Menu.Path != "" {
-		d := &codegen.Data{
-			Snake:        dry.MenuPlan.Menu.Path,
-			StructName:   dry.MenuPlan.Menu.Name,
-			Business:     dry.MenuPlan.Menu.Title,
-			ParentMenuID: parentMenuID,
+	casbinRebuilt := false
+	// A customer workspace carries a plan; it must not install its menus in the workbench DB.
+	if scope.ProjectID == model.DefaultProjectID {
+		if dry.MenuPlan != nil && dry.MenuPlan.Menu.Path != "" {
+			d := &codegen.Data{Snake: dry.MenuPlan.Menu.Path, StructName: dry.MenuPlan.Menu.Name, Business: dry.MenuPlan.Menu.Title, ParentMenuID: dry.MenuPlan.ParentMenuID}
+			mid, err := createGeneratedMenu(d)
+			if err != nil {
+				return rollbackApply(&audit, snap, 0, err, applied), nil
+			}
+			menuID = mid
 		}
-		mid, err := createGeneratedMenu(d)
-		if err != nil {
-			return rollbackApply(&audit, snap, 0, err, applied), nil
+		if err := rebuildCasbinForApply(); err != nil {
+			return rollbackApply(&audit, snap, menuID, err, applied), nil
 		}
-		menuID = mid
+		casbinRebuilt = true
 	}
+	result := &ApplyFilesResult{OK: true, Applied: applied, MenuID: menuID, CasbinRebuilt: casbinRebuilt, Rollback: map[string]any{"snapshotId": snap.backupDir}}
+	resultJSON, _ := json.Marshal(result)
+	update := global.DB.Model(&model.GenAudit{}).Where("id = ? AND status = ?", audit.ID, "applying").Updates(map[string]any{"status": "applied", "snapshot_id": snap.backupDir, "result": string(resultJSON)})
+	if update.Error != nil {
+		return rollbackApply(&audit, snap, menuID, update.Error, applied), nil
+	}
+	if update.RowsAffected != 1 {
+		return rollbackApply(&audit, snap, menuID, errors.New("批次状态已改变"), applied), nil
+	}
+	return result, nil
+}
 
-	if err := rebuildCasbinForApply(); err != nil {
-		return rollbackApply(&audit, snap, menuID, err, applied), nil
+func checkLegacyCodegenConflict(plan *CodegenMenuPlan) error {
+	if plan == nil {
+		return nil
 	}
-
-	filesJSON, _ := json.Marshal(files)
-	resultJSON, _ := json.Marshal(ApplyFilesResult{OK: true, Applied: applied, MenuID: menuID, CasbinRebuilt: true})
-	if err := global.DB.Model(&audit).Updates(map[string]any{
-		"status": "applied", "files": string(filesJSON), "snapshot_id": snapshotID, "result": string(resultJSON),
-	}).Error; err != nil {
-		return rollbackApply(&audit, snap, menuID, err, applied), nil
+	if plan.TableName != "" && global.DB.Migrator().HasTable(plan.TableName) {
+		return fmt.Errorf("数据表已存在: %s", plan.TableName)
 	}
-	rollback := map[string]any{
-		"snapshotId": snapshotID,
-		"command":    fmt.Sprintf("从 .fde-gen-backup/%s 恢复备份文件; 删除菜单 %d 及其按钮/授权后调用 RebuildCasbin", in.BatchID, menuID),
+	var count int64
+	if err := global.DB.Model(&model.Menu{}).Where("path = ? OR name = ?", plan.Menu.Path, plan.Menu.Name).Count(&count).Error; err != nil {
+		return err
 	}
-	return &ApplyFilesResult{OK: true, Applied: applied, MenuID: menuID, CasbinRebuilt: true, Rollback: rollback}, nil
+	if count > 0 {
+		return fmt.Errorf("同名菜单已存在: %s", plan.Menu.Path)
+	}
+	return nil
 }
 
 // rollbackApply 失败补偿: 恢复快照 -> 删除本次菜单/授权 -> 重建 casbin -> 审计 rolled_back
 func rollbackApply(audit *model.GenAudit, snap *genSnapshot, menuID uint, cause error, applied []map[string]any) *ApplyFilesResult {
-	details := make([]string, 0, 4)
-	details = append(details, fmt.Sprintf("本次已写盘 %d 个文件", len(applied)))
+	details := []string{fmt.Sprintf("本次已写盘 %d 个文件", len(applied))}
 	snapshotID := ""
+	complete := true
 	if snap != nil {
 		snapshotID = snap.backupDir
 		if err := snap.restore(); err != nil {
+			complete = false
 			details = append(details, "恢复快照失败: "+err.Error())
 		} else {
-			details = append(details, fmt.Sprintf("已恢复 %d 个快照文件", len(snap.manifest.Entries)))
+			details = append(details, "本次写入已恢复")
 		}
 	}
 	if menuID > 0 {
 		if err := deleteGeneratedMenuTree(menuID); err != nil {
+			complete = false
 			details = append(details, "删除菜单失败: "+err.Error())
 		} else {
 			details = append(details, fmt.Sprintf("已删除菜单 %d 及其按钮/授权", menuID))
 		}
 	}
-	if err := RebuildCasbin(); err != nil {
-		details = append(details, "重建casbin失败: "+err.Error())
-	} else {
-		details = append(details, "casbin 已重建")
+	if audit.ProjectID == model.DefaultProjectID {
+		if err := RebuildCasbin(); err != nil {
+			complete = false
+			details = append(details, "重建casbin失败: "+err.Error())
+		} else {
+			details = append(details, "casbin 已重建")
+		}
+	}
+	status, code, msg := "rolled_back", "APPLY_FAILED", "写入失败，已恢复本次变更: "
+	if !complete {
+		status, code, msg = "rollback_failed", "ROLLBACK_FAILED", "写入失败且恢复未完成，请检查恢复详情: "
 	}
 	detailText := strings.Join(details, "; ")
-	_ = markAuditRolledBack(audit, "SNAPSHOT_FAIL", cause.Error(), detailText)
-	return applyFilesFailWithRollback("SNAPSHOT_FAIL", "写盘/菜单/权限失败，已回滚: "+cause.Error(), map[string]any{
-		"snapshotId": snapshotID,
-		"details":    details,
-		"command":    fmt.Sprintf("已恢复快照并删除菜单 %d，casbin 已重建", menuID),
-	})
+	resultJSON, _ := json.Marshal(map[string]any{"errCode": code, "msg": cause.Error(), "rollback": detailText})
+	if err := global.DB.Model(audit).Updates(map[string]any{"status": status, "snapshot_id": snapshotID, "result": string(resultJSON)}).Error; err != nil {
+		complete = false
+		code, msg = "ROLLBACK_FAILED", "恢复记录保存失败，请核对文件与数据库状态: "
+		details = append(details, err.Error())
+	}
+	return applyFilesFailWithRollback(code, msg+cause.Error(), map[string]any{"snapshotId": snapshotID, "complete": complete, "details": details})
 }
 
 func markAuditRolledBack(audit *model.GenAudit, errCode, msg, detail string) error {
@@ -520,52 +580,48 @@ func rebuildCasbinForApply() error {
 	return RebuildCasbin()
 }
 
-// writeGenFile 校验路径白名单后写单个生成文件
+// writeGenFile 保留默认项目写入兼容函数；公开生成入口不得直接调用。
 func writeGenFile(f codegen.FileResult) error {
-	full, err := resolveGenFilePath(f.Path)
+	roots, err := loadCodegenRoots(model.DefaultProjectID)
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(full, []byte(f.Content), 0o644)
+	return roots.writeFile(f.Path, []byte(f.Content))
 }
 
-// validateGenFilePath 路径白名单: 仅允许 server/internal 与 web/src 前缀的相对路径
 func validateGenFilePath(p string) error {
-	if p == "" {
-		return errors.New("文件路径为空")
-	}
-	if path.IsAbs(p) {
-		return errors.New("不允许绝对路径: " + p)
+	if p == "" || path.IsAbs(p) || filepath.VolumeName(p) != "" || strings.Contains(p, "\\") {
+		return errors.New("不允许绝对路径或非规范文件路径")
 	}
 	clean := path.Clean(p)
-	if clean != p {
-		return errors.New("路径必须为规范相对路径: " + p)
-	}
-	if clean == ".." || strings.HasPrefix(clean, "../") {
-		return errors.New("路径不允许 ..: " + p)
+	if clean != p || clean == ".." || strings.HasPrefix(clean, "../") {
+		return errors.New("路径必须为规范相对路径，不能包含 ..")
 	}
 	if strings.HasPrefix(clean, "internal/") || strings.HasPrefix(clean, "web/src/") {
 		return nil
 	}
-	return errors.New("路径不在白名单(仅 server/internal 与 web/src): " + p)
+	return errors.New("路径不在白名单(仅 server/internal 与 web/src)")
 }
 
-// resolveGenFilePath 把生成器相对路径解析为绝对路径(web/ 前缀落到 WebDir, 其余落到 ServerDir)
 func resolveGenFilePath(p string) (string, error) {
-	if err := validateGenFilePath(p); err != nil {
+	return resolveGenFilePathInProject(model.DefaultProjectID, p)
+}
+
+func resolveGenFilePathInProject(projectID uint, p string) (string, error) {
+	roots, err := loadCodegenRoots(projectID)
+	if err != nil {
 		return "", err
 	}
-	if global.Config == nil {
-		return "", errors.New("代码生成目录配置未初始化")
+	dir, rel, err := roots.location(p)
+	if err != nil {
+		return "", err
 	}
-	cfg := global.Config.Codegen
-	if strings.HasPrefix(p, "web/") {
-		return filepath.Join(cfg.WebDir, strings.TrimPrefix(p, "web/")), nil
+	r, err := openCheckedRoot(dir, rel)
+	if err != nil {
+		return "", err
 	}
-	return filepath.Join(cfg.ServerDir, p), nil
+	r.Close()
+	return filepath.Join(dir, rel), nil
 }
 
 type snapshotManifest struct {
@@ -582,90 +638,95 @@ type snapshotEntry struct {
 type genSnapshot struct {
 	batchID   string
 	backupDir string
+	roots     codegenRoots
 	manifest  snapshotManifest
+	written   map[string]string
 }
 
-// takeGenSnapshot 把将被覆盖的既有文件备份到 .fde-gen-backup/<batchId>/ 并写 manifest.json
 func takeGenSnapshot(batchID string, files []codegen.FileResult) (*genSnapshot, error) {
-	if global.Config == nil {
-		return nil, errors.New("代码生成目录配置未初始化")
-	}
-	if batchID == "" || filepath.Base(batchID) != batchID {
-		return nil, errors.New("非法批次号: " + batchID)
-	}
-	backupDir := filepath.Join(global.Config.Codegen.ServerDir, ".fde-gen-backup", batchID)
-	if err := os.MkdirAll(backupDir, 0o755); err != nil {
+	roots, err := loadCodegenRoots(model.DefaultProjectID)
+	if err != nil {
 		return nil, err
 	}
-	snap := &genSnapshot{batchID: batchID, backupDir: backupDir}
-	cleanup := func() { _ = os.RemoveAll(backupDir) }
+	return takeGenSnapshotInRoots(batchID, files, roots)
+}
+
+func takeGenSnapshotInRoots(batchID string, files []codegen.FileResult, roots codegenRoots) (*genSnapshot, error) {
+	if _, err := uuid.Parse(batchID); err != nil {
+		return nil, errors.New("非法批次号")
+	}
+	backupRel := filepath.Join(".fde-gen-backup", batchID)
+	snap := &genSnapshot{batchID: batchID, backupDir: filepath.Join(roots.server, backupRel), roots: roots, written: map[string]string{}}
 	for i, f := range files {
-		full, err := resolveGenFilePath(f.Path)
+		dir, rel, err := roots.location(f.Path)
 		if err != nil {
-			cleanup()
 			return nil, err
 		}
-		st, statErr := os.Stat(full)
-		if statErr == nil && st.IsDir() {
-			cleanup()
-			return nil, fmt.Errorf("目标路径是目录: %s", f.Path)
-		}
-		if statErr == nil {
-			backupName := fmt.Sprintf("%04d_%s", i, filepath.Base(f.Path))
-			if err := copyFile(full, filepath.Join(backupDir, backupName)); err != nil {
-				cleanup()
-				return nil, err
-			}
-			snap.manifest.Entries = append(snap.manifest.Entries, snapshotEntry{Path: f.Path, Status: "backed_up", Backup: backupName})
-		} else if errors.Is(statErr, os.ErrNotExist) {
+		data, err := readRootedFile(dir, rel)
+		if errors.Is(err, os.ErrNotExist) {
 			snap.manifest.Entries = append(snap.manifest.Entries, snapshotEntry{Path: f.Path, Status: "will_create"})
-		} else {
-			cleanup()
-			return nil, statErr
+			continue
 		}
+		if err != nil {
+			return nil, err
+		}
+		name := fmt.Sprintf("%04d_%s", i, filepath.Base(f.Path))
+		if err := writeRootedFile(roots.server, filepath.Join(backupRel, name), data); err != nil {
+			return nil, err
+		}
+		snap.manifest.Entries = append(snap.manifest.Entries, snapshotEntry{Path: f.Path, Status: "backed_up", Backup: name})
 	}
-	manifest := snapshotManifest{BatchID: batchID, Entries: snap.manifest.Entries}
-	b, err := json.MarshalIndent(manifest, "", "  ")
+	snap.manifest.BatchID = batchID
+	b, err := json.MarshalIndent(snap.manifest, "", "  ")
 	if err != nil {
-		cleanup()
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(backupDir, "manifest.json"), b, 0o644); err != nil {
-		cleanup()
+	if err := writeRootedFile(roots.server, filepath.Join(backupRel, "manifest.json"), b); err != nil {
 		return nil, err
 	}
 	return snap, nil
 }
 
-// restore 恢复快照: backed_up 文件覆盖回原位, will_create 文件删除
 func (s *genSnapshot) restore() error {
 	if s == nil {
 		return nil
 	}
 	for _, e := range s.manifest.Entries {
-		full, err := resolveGenFilePath(e.Path)
-		if err != nil {
+		writtenHash, changed := s.written[e.Path]
+		if !changed {
 			continue
+		}
+		current, err := s.roots.baseline(e.Path)
+		if err != nil {
+			return err
+		}
+		if !current.Exists || current.SHA256 != writtenHash {
+			return fmt.Errorf("恢复前文件已被其他操作修改: %s", e.Path)
 		}
 		switch e.Status {
 		case "backed_up":
-			if err := copyFile(filepath.Join(s.backupDir, e.Backup), full); err != nil {
+			data, err := readRootedFile(s.roots.server, filepath.Join(".fde-gen-backup", s.batchID, e.Backup))
+			if err != nil {
+				return err
+			}
+			if err := s.roots.writeFile(e.Path, data); err != nil {
 				return err
 			}
 		case "will_create":
-			_ = os.Remove(full)
+			dir, rel, err := s.roots.location(e.Path)
+			if err != nil {
+				return err
+			}
+			r, err := openCheckedRoot(dir, rel)
+			if err != nil {
+				return err
+			}
+			err = r.Remove(rel)
+			r.Close()
+			if err != nil {
+				return err
+			}
 		}
 	}
 	return nil
-}
-
-func copyFile(src, dst string) error {
-	data, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(dst, data, 0o644)
 }

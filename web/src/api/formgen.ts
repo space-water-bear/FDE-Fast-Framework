@@ -1,5 +1,5 @@
 import request from '@/utils/request'
-import type { FormSchema, XUi } from '@/components/form-render/types'
+import type { BusinessFieldType, FormRelation, FormSchema, LinkageRule, XUi } from '@/components/form-render/types'
 
 export interface FormgenObjectItem {
   id: number
@@ -8,23 +8,24 @@ export interface FormgenObjectItem {
   tableName: string
   remark: string
   version: number
+  activeVersion: number
   createdAt: string
 }
 
 export interface FormgenFieldInput {
   name: string
   title?: string
-  type: 'string' | 'text' | 'int' | 'float' | 'bool' | 'datetime' | 'enum' | 'relation'
+  type: BusinessFieldType
   required?: boolean
   rules?: Record<string, unknown>
   'x-ui'?: XUi
+  searchable?: boolean
+  inList?: boolean
+  inForm?: boolean
+  sort?: number
 }
 
-export interface FormgenRelationInput {
-  field: string
-  targetObject: string
-  kind: 'many_to_one' | 'one_to_many'
-}
+export type FormgenRelationInput = FormRelation
 
 // 与设计文档 6.1 generate_form_schema 参数一致
 export interface FormgenGenerateRequest {
@@ -32,12 +33,20 @@ export interface FormgenGenerateRequest {
   name: string
   fields: FormgenFieldInput[]
   relations?: FormgenRelationInput[]
+  linkages?: LinkageRule[]
+  schema?: FormSchema
+  expectedVersion?: number
   mode?: 'create' | 'update'
   dryRun?: boolean
 }
 
 export type FormgenObjectPayload = FormgenGenerateRequest
 export type FormgenPreviewRequest = FormgenGenerateRequest
+
+export interface FormgenSavedObject {
+  object: FormgenObjectItem
+  schema: FormSchema
+}
 
 export interface FormgenPreviewResult {
   ok: boolean
@@ -56,17 +65,23 @@ export function listFormgenObjects(params: { page: number; pageSize: number; key
 }
 
 export function createFormgenObject(data: FormgenObjectPayload) {
-  return request.post<any, null>('/formgen/objects', data, { silent404: true } as any)
+  return request.post<any, FormgenSavedObject>('/formgen/objects', data, { silent404: true } as any)
 }
 
 export function updateFormgenObject(objectKey: string, data: FormgenObjectPayload) {
-  return request.put<any, null>('/formgen/objects/' + encodeURIComponent(objectKey), data, {
+  return request.put<any, FormgenSavedObject>('/formgen/objects/' + encodeURIComponent(objectKey), data, {
     silent404: true,
   } as any)
 }
 
-export function getFormgenSchema(objectKey: string) {
-  return request.get<any, FormSchema>('/formgen/schema/' + encodeURIComponent(objectKey))
+export function getFormgenSchema(objectKey: string, version: 'draft' | number | undefined = undefined) {
+  return request.get<any, FormSchema>('/formgen/schema/' + encodeURIComponent(objectKey), { params: { version } })
+}
+
+export function activateFormgenSchema(objectKey: string, data: { version: number; expectedActiveVersion: number }) {
+  return request.post<any, FormgenSavedObject>(
+    '/formgen/objects/' + encodeURIComponent(objectKey) + '/activate', data,
+  )
 }
 
 export function previewFormgenSchema(data: FormgenPreviewRequest) {

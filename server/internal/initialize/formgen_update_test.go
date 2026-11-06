@@ -44,10 +44,12 @@ func TestUpdateBizObjectVersionAndFields(t *testing.T) {
 	if before.Version != 1 {
 		t.Fatalf("before version = %d, want 1", before.Version)
 	}
+	expected := 1
 	updated, err := service.UpdateBizObject("biz_customer", service.FormgenObjectInput{
-		ObjectKey: "biz_customer",
-		Name:      "客户V2",
-		TableName: "biz_customer",
+		ObjectKey:       "biz_customer",
+		Name:            "客户V2",
+		ExpectedVersion: &expected,
+		TableName:       "biz_customer",
 		Fields: []service.FormgenField{
 			{Name: "name", Title: "名称", Type: "string", Required: true, InList: true, InForm: true},
 			{Name: "balance", Title: "余额", Type: "float", InList: true, InForm: true},
@@ -126,4 +128,55 @@ func createdError(res *service.FormgenResult) string {
 		return ""
 	}
 	return res.Error.Msg
+}
+
+func TestMigrateFormgenProjectNamespacePreservesLegacySchema(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open("file:"+t.Name()+"?mode=memory&cache=shared"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Reproduce the previous schema and its GORM-created global unique key index.
+	if err := db.Exec("CREATE TABLE sys_biz_objects (id integer PRIMARY KEY, created_at datetime, updated_at datetime, key text, name text, table_name text, remark text, schema text, version integer DEFAULT 1)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX idx_sys_biz_objects_key ON sys_biz_objects(key)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO sys_biz_objects(id,key,name,table_name,schema,version) VALUES(1,'biz_customer','Legacy','biz_customer','{}',1)").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Create(&model.FormSchema{ObjectID: 1, Version: 1, Schema: `{"objectKey":"biz_customer","fields":{"name":{"type":"string"}}}`, Published: true, CreatedBy: 9}).Error; err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := migrateFormgenProjectNamespace(db); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var obj model.BizObject
+	if err := db.First(&obj, 1).Error; err != nil {
+		t.Fatal(err)
+	}
+	if obj.ProjectID != model.DefaultProjectID || obj.ActiveVersion != 1 || obj.Name != "Legacy" {
+		t.Fatalf("legacy data changed: %+v", obj)
+	}
+	if db.Migrator().HasIndex(&model.BizObject{}, "idx_sys_biz_objects_key") {
+		t.Fatal("legacy global key index still exists")
+	}
+	if err := db.Create(&model.BizObject{ProjectID: 2, Key: "biz_customer", Name: "Other project"}).Error; err != nil {
+		t.Fatalf("other project cannot use same key: %v", err)
+	}
+	if err := db.Create(&model.BizObject{ProjectID: 1, Key: "biz_customer", Name: "Duplicate"}).Error; err == nil {
+		t.Fatal("duplicate key within project was allowed")
+	}
+	var fs model.FormSchema
+	if err := db.Where("object_id = ?", obj.ID).First(&fs).Error; err != nil {
+		t.Fatal(err)
+	}
+	if !fs.Published || fs.CreatedBy != 9 {
+		t.Fatal("legacy published schema not preserved")
+	}
 }

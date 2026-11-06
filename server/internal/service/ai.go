@@ -348,6 +348,17 @@ func DeleteAiMcpServer(id uint) error {
 // ---------- 会话 ----------
 
 func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int64, error) {
+	return listAiSessionsForUser(0, keyword, page, pageSize)
+}
+
+func ListAiSessionsForUser(userID uint, keyword string, page, pageSize int) ([]model.AiSession, int64, error) {
+	if userID == 0 {
+		return nil, 0, errors.New("未登录")
+	}
+	return listAiSessionsForUser(userID, keyword, page, pageSize)
+}
+
+func listAiSessionsForUser(userID uint, keyword string, page, pageSize int) ([]model.AiSession, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -355,6 +366,9 @@ func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int6
 		pageSize = 20
 	}
 	q := global.DB.Model(&model.AiSession{})
+	if userID != 0 {
+		q = q.Where("user_id = ?", userID)
+	}
 	if keyword != "" {
 		like := "%" + keyword + "%"
 		q = q.Where("title LIKE ?", like)
@@ -371,10 +385,14 @@ func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int6
 }
 
 func CreateAiSession(title string, agentID, userID uint) (*model.AiSession, error) {
+	return CreateAiSessionInProject(title, agentID, userID, model.DefaultProjectID)
+}
+
+func CreateAiSessionInProject(title string, agentID, userID, projectID uint) (*model.AiSession, error) {
 	if title == "" {
 		title = "新会话"
 	}
-	s := &model.AiSession{Title: title, AgentID: agentID, UserID: userID}
+	s := &model.AiSession{Title: title, AgentID: agentID, ProjectID: projectID, UserID: userID}
 	if err := global.DB.Create(s).Error; err != nil {
 		return nil, err
 	}
@@ -504,7 +522,7 @@ func saveUserMessage(sessionID uint, content string) error {
 }
 
 // runAgentAndSave 构建 Agent 并执行一轮对话, 保存助手消息
-func runAgentAndSave(sessionID uint, messages []*message.Message, ag *model.AiAgent, systemPrompt string) (*model.AiMessage, error) {
+func runAgentAndSave(ctx context.Context, sessionID uint, messages []*message.Message, ag *model.AiAgent, systemPrompt string) (*model.AiMessage, error) {
 	started := time.Now()
 	provider, err := loadProvider(ag)
 	if err != nil {
@@ -519,7 +537,7 @@ func runAgentAndSave(sessionID uint, messages []*message.Message, ag *model.AiAg
 		logChatResult(sessionID, provider.APIMode, started, 0, err)
 		return nil, err
 	}
-	resp, err := a.Run(context.Background(), messages).Collect()
+	resp, err := a.Run(ctx, messages).Collect()
 	if err != nil {
 		logChatResult(sessionID, provider.APIMode, started, 0, err)
 		return nil, err
@@ -571,6 +589,9 @@ func (t *schemaFuncTool) Description() string { return t.description }
 func (t *schemaFuncTool) Schema() any         { return t.schema }
 func (t *schemaFuncTool) ReturnSchema() any   { return map[string]any{"type": "object"} }
 func (t *schemaFuncTool) Call(ctx context.Context, args string) (any, error) {
+	if err := authorizeEngineeringTool(ctx, t.name, args); err != nil {
+		return nil, err
+	}
 	if t.call != nil {
 		return t.call(ctx, args)
 	}
@@ -841,6 +862,10 @@ func logChatResult(sessionID uint, mode string, started time.Time, chars int, er
 
 // ChatAi 会话对话: 保存用户消息 -> MAF-Go Agent(自动工具调用) -> 保存助手回复
 func ChatAi(sessionID uint, content string) (*model.AiMessage, error) {
+	return ChatAiWithContext(context.Background(), sessionID, content)
+}
+
+func ChatAiWithContext(ctx context.Context, sessionID uint, content string) (*model.AiMessage, error) {
 	if err := saveUserMessage(sessionID, content); err != nil {
 		return nil, err
 	}
@@ -848,11 +873,15 @@ func ChatAi(sessionID uint, content string) (*model.AiMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // RegenerateAiSession 重新生成最后一条助手回复
 func RegenerateAiSession(sessionID uint) (*model.AiMessage, error) {
+	return RegenerateAiSessionWithContext(context.Background(), sessionID)
+}
+
+func RegenerateAiSessionWithContext(ctx context.Context, sessionID uint) (*model.AiMessage, error) {
 	var lastUser model.AiMessage
 	if err := global.DB.Where("session_id = ? AND role = ?", sessionID, "user").Order("id desc").First(&lastUser).Error; err != nil {
 		return nil, errors.New("没有可重新生成的消息")
@@ -864,11 +893,15 @@ func RegenerateAiSession(sessionID uint) (*model.AiMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // ResendAiMessage 编辑用户消息后重发: 更新该消息并丢弃其后所有消息
 func ResendAiMessage(sessionID, messageID uint, content string) (*model.AiMessage, error) {
+	return ResendAiMessageWithContext(context.Background(), sessionID, messageID, content)
+}
+
+func ResendAiMessageWithContext(ctx context.Context, sessionID, messageID uint, content string) (*model.AiMessage, error) {
 	var msg model.AiMessage
 	if err := global.DB.Where("id = ? AND session_id = ? AND role = ?", messageID, sessionID, "user").First(&msg).Error; err != nil {
 		return nil, errors.New("消息不存在")
@@ -883,7 +916,7 @@ func ResendAiMessage(sessionID, messageID uint, content string) (*model.AiMessag
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // RenameAiSession 重命名会话

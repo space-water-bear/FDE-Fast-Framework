@@ -2,9 +2,6 @@ package service
 
 import (
 	"errors"
-	"os"
-	"path/filepath"
-	"strings"
 
 	"gorm.io/gorm"
 
@@ -53,57 +50,10 @@ func CodegenPreview(req codegen.GenRequest) ([]codegen.FileResult, error) {
 	return codegen.Render(d)
 }
 
-// CodegenGenerate 写盘 + 创建菜单/按钮 + 分配角色 + 重建 casbin
+// CodegenGenerate no longer accepts an unreviewed request as permission to write.
+// Kept for source compatibility; callers must preview then explicitly apply its batch.
 func CodegenGenerate(req codegen.GenRequest) ([]codegen.FileResult, uint, error) {
-	d, err := codegen.Prepare(req)
-	if err != nil {
-		return nil, 0, err
-	}
-	if global.DB.Migrator().HasTable(req.TableName) {
-		return nil, 0, errors.New("数据表 " + req.TableName + " 已存在，请更换表名")
-	}
-	var menuCount int64
-	if err := global.DB.Model(&model.Menu{}).Where("path = ? AND name = ?", d.Snake, d.StructName).Count(&menuCount).Error; err != nil {
-		return nil, 0, err
-	}
-	if menuCount > 0 {
-		return nil, 0, errors.New("同名菜单已存在: " + d.Snake)
-	}
-
-	files, err := codegen.Render(d)
-	if err != nil {
-		return nil, 0, err
-	}
-	if err := writeGenFiles(files); err != nil {
-		return nil, 0, err
-	}
-	menuID, err := createGeneratedMenu(d)
-	if err != nil {
-		return nil, 0, err
-	}
-	if err := RebuildCasbin(); err != nil {
-		return nil, 0, err
-	}
-	return files, menuID, nil
-}
-
-func writeGenFiles(files []codegen.FileResult) error {
-	cfg := global.Config.Codegen
-	for _, f := range files {
-		var full string
-		if strings.HasPrefix(f.Path, "web/") {
-			full = filepath.Join(cfg.WebDir, strings.TrimPrefix(f.Path, "web/"))
-		} else {
-			full = filepath.Join(cfg.ServerDir, f.Path)
-		}
-		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-			return err
-		}
-		if err := os.WriteFile(full, []byte(f.Content), 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
+	return nil, 0, errors.New("APPROVAL_REQUIRED: 请先预览，再通过 batchId 明确确认写入")
 }
 
 func createGeneratedMenu(d *codegen.Data) (uint, error) {
