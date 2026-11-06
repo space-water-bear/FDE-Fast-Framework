@@ -100,7 +100,7 @@ func (r *Runner) Check(ctx context.Context, req Request) (report Report, retErr 
 	if err := copySnapshot(workspace, source); err != nil {
 		return report, err
 	}
-	defer os.RemoveAll(source)
+	defer removeCheckScratch(source)
 	if copied, err := SnapshotHash(source); err != nil || copied != hash {
 		return report, errors.New("source changed while creating check snapshot")
 	}
@@ -109,8 +109,8 @@ func (r *Runner) Check(ctx context.Context, req Request) (report Report, retErr 
 			return report, err
 		}
 	}
-	defer os.RemoveAll(filepath.Join(dir, "go"))
-	defer os.RemoveAll(filepath.Join(dir, "cache"))
+	defer removeCheckScratch(filepath.Join(dir, "go"))
+	defer removeCheckScratch(filepath.Join(dir, "cache"))
 	inspect, err := r.executor.Run(ctx, Command{Args: []string{"image", "inspect", Image, "--format", "{{.Id}}"}, LogPath: filepath.Join(dir, "image.log"), MaxLogBytes: 4096})
 	if err != nil || inspect.ExitCode != 0 {
 		report.FailedStep = "image"

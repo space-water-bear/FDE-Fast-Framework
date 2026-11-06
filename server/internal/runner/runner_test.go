@@ -109,6 +109,38 @@ func TestCancellationCleansNamedContainer(t *testing.T) {
 	}
 }
 
+func TestScratchCleanupRemovesReadOnlyCachesWithoutFollowingLinks(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	sentinel := filepath.Join(outside, "keep")
+	if err := os.WriteFile(sentinel, []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache := filepath.Join(root, "scratch")
+	module := filepath.Join(cache, "module")
+	if err := os.MkdirAll(module, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(module, "source.go"), []byte("package example"), 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(cache, "outside")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(module, 0o555); err != nil {
+		t.Fatal(err)
+	}
+	if err := removeCheckScratch(cache); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatal("scratch cache retained")
+	}
+	if _, err := os.Stat(sentinel); err != nil {
+		t.Fatal("cleanup followed a symlink")
+	}
+}
+
 func TestSnapshotBindsSourceAndExcludesRuntime(t *testing.T) {
 	root := fixture(t)
 	before, _ := SnapshotHash(root)
