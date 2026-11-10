@@ -29,14 +29,34 @@ export interface GenFile {
   content: string
 }
 
+export interface GenPreview {
+  ok: boolean
+  batchId: string
+  files: GenFile[]
+  diff?: { conflicts?: unknown[]; [key: string]: unknown }
+  menuPlan?: unknown
+  warnings?: string[]
+  restartRequired?: boolean
+  error?: { msg?: string; errCode?: string }
+}
+
+export interface GenApplyResult {
+  ok: boolean
+  applied?: { path: string; status: string }[]
+  menuId?: number
+  casbinRebuilt?: boolean
+  rollback?: unknown
+  error?: { msg?: string; errCode?: string }
+}
+
 export function getCodegenOptions() {
   return request.get<any, { fieldTypes: FieldTypeOption[]; parentMenus: MenuInfo[] }>('/codegen/options')
 }
 
 export function previewCode(data: GenRequest) {
-  return request.post<any, { files: GenFile[] }>('/codegen/preview', data)
+  return request.post<any, GenPreview>('/codegen/preview', data)
 }
 
-export function generateCode(data: GenRequest) {
-  return request.post<any, { files: GenFile[]; menuId: number; restartRequired: boolean }>('/codegen/generate', data)
+export function generateCode(data: { batchId: string; approve: true }) {
+  return request.post<any, GenApplyResult>('/codegen/generate', data)
 }

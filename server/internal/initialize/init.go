@@ -58,6 +58,9 @@ func Run(cfg *config.Config) {
 	if err := seedData(); err != nil {
 		log.Fatalf("初始化种子数据失败: %v", err)
 	}
+	if err := ensureDevelopmentDefaults(); err != nil {
+		log.Fatalf("初始化开发项目失败: %v", err)
+	}
 	for name, fn := range map[string]func() error{
 		"代码生成器菜单":     ensureCodegenMenu,
 		"字典管理菜单":      ensureDictMenu,
@@ -65,7 +68,11 @@ func Run(cfg *config.Config) {
 		"登录设备菜单":      ensureDeviceMenu,
 		"文件管理菜单":      ensureFileMenu,
 		"表格示例菜单":      ensureTableDemoMenu,
+		"图表示例菜单":      ensureChartDemoMenu,
+		"图表生成技能":      ensureChartBuilderSkill,
+		"页面和业务生成技能":   ensureGenerationSkills,
 		"AI助手菜单":      ensureAiMenus,
+		"AI机器人菜单":     ensureAiBotMenu,
 		"AI流式聊天按钮":    ensureAiSessionStreamButton,
 		"AI用量统计菜单":    ensureAiUsageMenu,
 		"表单生成工具":      ensureFormgenAiTool,
@@ -73,6 +80,7 @@ func Run(cfg *config.Config) {
 		"表单生成apply按钮": ensureFormgenApplyButton,
 		"表单生成更新按钮":    ensureFormgenUpdateButton,
 		"代码生成工具":      ensureCodegenAiTools,
+		"开发项目权限":      ensureDevelopmentMenus,
 	} {
 		if err := fn(); err != nil {
 			log.Fatalf("初始化%s失败: %v", name, err)
@@ -80,22 +88,30 @@ func Run(cfg *config.Config) {
 	}
 }
 
-func initDB(cfg *config.Config) error {
+func openDatabase(cfg *config.Config) (*gorm.DB, error) {
 	var dialector gorm.Dialector
 	switch cfg.DB.Driver {
 	case "sqlite":
 		if dir := filepath.Dir(cfg.DB.DSN); dir != "." {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return err
+				return nil, err
 			}
 		}
 		dialector = sqlite.Open(cfg.DB.DSN)
 	case "postgres":
 		dialector = postgres.Open(cfg.DB.DSN)
 	default:
-		return fmt.Errorf("不支持的数据库驱动: %s (仅支持 sqlite / postgres)", cfg.DB.Driver)
+		return nil, fmt.Errorf("不支持的数据库驱动: %s (仅支持 sqlite / postgres)", cfg.DB.Driver)
 	}
 	db, err := gorm.Open(dialector, &gorm.Config{Logger: logger.Default.LogMode(logger.Warn)})
+	if err != nil {
+		return nil, err
+	}
+	return db, nil
+}
+
+func initDB(cfg *config.Config) error {
+	db, err := openDatabase(cfg)
 	if err != nil {
 		return err
 	}
@@ -106,9 +122,26 @@ func initDB(cfg *config.Config) error {
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{}, &model.AiUsage{},
 		&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{},
+		&model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{}, &model.DevRelease{}, &model.DevDeployment{},
 	}, model.RegistryTables()...)
+	if cfg.App.Mode != "release" {
+		models = append(models, &model.AiBot{}, &model.AiBotConversation{}, &model.AiBotDelivery{}, &model.AiBotSendAttempt{})
+	}
 	if err := db.AutoMigrate(models...); err != nil {
 		return err
+	}
+	if err := migrateFormgenProjectNamespace(db); err != nil {
+		return err
+	}
+	if cfg.App.Mode != "release" {
+		// Both database drivers support these indexes. Legacy HTTP records
+		// without a connection ID are excluded.
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_wecom_bot_id ON sys_ai_bots (bot_id) WHERE platform = 'wecom' AND bot_id <> ''").Error; err != nil {
+			return err
+		}
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_dingtalk_client_id ON sys_ai_bots (client_id) WHERE platform = 'dingtalk' AND client_id <> ''").Error; err != nil {
+			return err
+		}
 	}
 	global.DB = db
 	return nil

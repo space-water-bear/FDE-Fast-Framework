@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"fde-admin/internal/global"
 	"fde-admin/internal/model"
 	"fde-admin/internal/service"
 	"fde-admin/internal/utils"
@@ -352,15 +353,56 @@ type aiChatReq struct {
 	Content string `json:"content" binding:"required"`
 }
 
+type aiSessionListItem struct {
+	model.AiSession
+	CanDelete bool `json:"canDelete"`
+}
+
 func ListAiSessions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
-	list, total, err := service.ListAiSessions(c.Query("keyword"), page, pageSize)
+	claims := utils.GetClaims(c)
+	if claims == nil || claims.UserID == 0 {
+		utils.NoAuth(c, "未登录")
+		return
+	}
+	includeBotHistory := isAiSessionHistoryAdmin(claims.UserID)
+	list, total, err := service.ListAiSessionsForViewer(claims.UserID, c.Query("keyword"), page, pageSize, includeBotHistory)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
 	}
-	utils.OK(c, gin.H{"list": list, "total": total})
+	bound, err := boundBotSessionIDs(list)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	items := make([]aiSessionListItem, 0, len(list))
+	for _, session := range list {
+		items = append(items, aiSessionListItem{AiSession: session, CanDelete: !bound[session.ID]})
+	}
+	utils.OK(c, gin.H{"list": items, "total": total})
+}
+
+func boundBotSessionIDs(sessions []model.AiSession) (map[uint]bool, error) {
+	ids := []uint{}
+	for _, session := range sessions {
+		if isBotHistorySession(session) {
+			ids = append(ids, session.ID)
+		}
+	}
+	bound := make(map[uint]bool)
+	if len(ids) == 0 {
+		return bound, nil
+	}
+	var linked []uint
+	if err := global.DB.Model(&model.AiBotConversation{}).Where("session_id IN ?", ids).Pluck("session_id", &linked).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range linked {
+		bound[id] = true
+	}
+	return bound, nil
 }
 
 func CreateAiSession(c *gin.Context) {
@@ -374,7 +416,17 @@ func CreateAiSession(c *gin.Context) {
 		utils.NoAuth(c, "未登录")
 		return
 	}
-	session, err := service.CreateAiSession(req.Title, req.AgentID, claims.UserID)
+	scope, ok := requestEngineeringIdentity(c)
+	if !ok {
+		return
+	}
+	if scope.ProjectID != model.DefaultProjectID {
+		if _, err := service.EngineeringProject(scope); err != nil {
+			utils.Forbidden(c, err.Error())
+			return
+		}
+	}
+	session, err := service.CreateAiSessionInProject(req.Title, req.AgentID, claims.UserID, scope.ProjectID)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -388,6 +440,19 @@ func DeleteAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	session, ok := readableAiSession(c, id)
+	if !ok {
+		return
+	}
+	bound, err := boundBotSessionIDs([]model.AiSession{session})
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	if bound[id] {
+		utils.Forbidden(c, "机器人仍关联此会话，当前只能查看历史")
+		return
+	}
 	if err := service.DeleteAiSession(id); err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -399,6 +464,9 @@ func ListAiMessages(c *gin.Context) {
 	id, err := utils.ParseID(c)
 	if err != nil {
 		utils.Fail(c, "参数错误")
+		return
+	}
+	if _, ok := readableAiSession(c, id); !ok {
 		return
 	}
 	list, err := service.ListAiMessages(id)
@@ -415,12 +483,16 @@ func ChatAi(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	var req aiChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.Fail(c, "请输入内容")
 		return
 	}
-	msg, err := service.ChatAi(id, req.Content)
+	msg, err := service.ChatAiWithContext(ctx, id, req.Content)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -436,6 +508,9 @@ func RenameAiSession(c *gin.Context) {
 	id, err := utils.ParseID(c)
 	if err != nil {
 		utils.Fail(c, "参数错误")
+		return
+	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
 		return
 	}
 	var req aiRenameReq
@@ -456,6 +531,9 @@ func ClearAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	if _, ok := ownedAiSessionContext(c, id); !ok {
+		return
+	}
 	if err := service.ClearAiSession(id); err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -469,7 +547,11 @@ func RegenerateAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
-	msg, err := service.RegenerateAiSession(id)
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
+	msg, err := service.RegenerateAiSessionWithContext(ctx, id)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -483,6 +565,10 @@ func ResendAiMessage(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	mid64, err := strconv.ParseUint(c.Param("mid"), 10, 64)
 	if err != nil {
 		utils.Fail(c, "参数错误")
@@ -494,7 +580,7 @@ func ResendAiMessage(c *gin.Context) {
 		utils.Fail(c, "请输入内容")
 		return
 	}
-	msg, err := service.ResendAiMessage(id, mid, req.Content)
+	msg, err := service.ResendAiMessageWithContext(ctx, id, mid, req.Content)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
@@ -531,6 +617,10 @@ func StreamChatAi(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
+	ctx, ok := ownedAiSessionContext(c, id)
+	if !ok {
+		return
+	}
 	var req aiChatReq
 	if err := c.ShouldBindJSON(&req); err != nil {
 		utils.Fail(c, "请输入内容")
@@ -541,13 +631,13 @@ func StreamChatAi(c *gin.Context) {
 	c.Writer.Header().Set("Cache-Control", "no-cache")
 	c.Writer.Header().Set("Connection", "keep-alive")
 	c.Writer.Header().Set("X-Accel-Buffering", "no")
-	flusher, ok := c.Writer.(http.Flusher)
-	if !ok {
+	flusher, streamOK := c.Writer.(http.Flusher)
+	if !streamOK {
 		utils.Fail(c, "当前服务器不支持流式输出")
 		return
 	}
 
-	full, err := service.StreamChatAiTo(c.Request.Context(), id, req.Content, func(delta string) {
+	full, err := service.StreamChatAiTo(ctx, id, req.Content, func(delta string) {
 		b, _ := json.Marshal(gin.H{"delta": delta})
 		fmt.Fprintf(c.Writer, "data: %s\n\n", b)
 		flusher.Flush()

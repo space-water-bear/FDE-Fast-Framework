@@ -214,16 +214,24 @@ func TestMCPListToolsAndCallGenerateFormSchema(t *testing.T) {
 		case "apply_files":
 			props := schema["properties"].(map[string]any)
 			approve := props["approve"].(map[string]any)
-			if approve["const"] != true {
-				t.Fatalf("tool apply_files approve.const = %v", approve["const"])
+			if approve["type"] != "boolean" || !strings.Contains(tool.Description, "APPROVAL_REQUIRED") {
+				t.Fatal("apply tool must describe the compatibility refusal")
 			}
 		}
 	}
 
 	// 关键字段与设计文档 6.1 / 6.2 / 6.3 保持一致。
 	formgen := byName["generate_form_schema"].InputSchema.(map[string]any)
-	if required := formgen["required"].([]any); len(required) != 3 {
-		t.Fatalf("generate_form_schema required = %v, want 3 items", required)
+	if alternatives, _ := formgen["anyOf"].([]any); len(alternatives) != 2 {
+		t.Fatal("schema preview must accept a complete schema or field-array contract")
+	}
+	for _, name := range []string{"schema", "expectedVersion", "linkages"} {
+		if schemaAt(t, formgen, "properties", name) == nil {
+			t.Fatalf("form contract missing %s", name)
+		}
+	}
+	if schemaAt(t, formgen, "properties", "dryRun", "const") != true {
+		t.Fatal("MCP service form tool must be preview-only")
 	}
 	if enum := schemaAt(t, formgen, "$defs", "fieldDef", "properties", "type", "enum"); !containsString(enum, "relation") {
 		t.Fatalf("generate_form_schema fieldDef enum missing relation: %v", enum)
@@ -233,8 +241,11 @@ func TestMCPListToolsAndCallGenerateFormSchema(t *testing.T) {
 		t.Fatalf("generate_business_code fieldDef enum should not contain relation: %v", enum)
 	}
 	apply := byName["apply_files"].InputSchema.(map[string]any)
-	if schemaAt(t, apply, "properties", "approve", "const") != true {
-		t.Fatalf("apply_files approve.const missing or not true")
+	if schemaAt(t, apply, "properties", "approve", "type") != "boolean" {
+		t.Fatal("legacy approve field missing")
+	}
+	if schemaAt(t, codegen, "properties", "dryRun", "const") != true {
+		t.Fatal("codegen must remain preview-only")
 	}
 
 	callRes, err := session.CallTool(ctx, &mcpsdk.CallToolParams{

@@ -1,0 +1,5 @@
+export { default as BaseChart } from './BaseChart.vue'
+export { createBarOption, createDonutOption, createLineOption } from './options'
+export type { CartesianChartConfig, ChartSeries, DonutChartConfig } from './options'
+export { registerCharts } from './runtime'
+export type { ECElementEvent, EChartsOption, EChartsType } from 'echarts'

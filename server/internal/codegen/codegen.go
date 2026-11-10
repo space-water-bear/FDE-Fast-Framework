@@ -2,10 +2,12 @@ package codegen
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"regexp"
+	"strconv"
 	"strings"
 	"text/template"
 
@@ -39,13 +41,14 @@ var (
 )
 
 type GenField struct {
-	Name     string `json:"name"`
-	Title    string `json:"title"`
-	Type     string `json:"type"`
-	Search   bool   `json:"search"`
-	InList   bool   `json:"inList"`
-	InForm   bool   `json:"inForm"`
-	Required bool   `json:"required"`
+	Name     string         `json:"name"`
+	Title    string         `json:"title"`
+	Type     string         `json:"type"`
+	Search   bool           `json:"search"`
+	InList   bool           `json:"inList"`
+	InForm   bool           `json:"inForm"`
+	Required bool           `json:"required"`
+	Rules    map[string]any `json:"rules,omitempty"`
 }
 
 type GenRequest struct {
@@ -65,16 +68,20 @@ type FileResult struct {
 
 // Data 模板渲染数据
 type Data struct {
-	TableName    string
-	StructName   string
-	Business     string
-	Snake        string
-	HasTime      bool
-	ParentMenuID uint
-	Fields       []FieldData
-	SearchFields []FieldData
-	ListFields   []FieldData
-	FormFields   []FieldData
+	SchemaDriven  bool
+	ObjectKey     string
+	SchemaLiteral string
+	SchemaJSON    string
+	TableName     string
+	StructName    string
+	Business      string
+	Snake         string
+	HasTime       bool
+	ParentMenuID  uint
+	Fields        []FieldData
+	SearchFields  []FieldData
+	ListFields    []FieldData
+	FormFields    []FieldData
 }
 
 type FieldData struct {
@@ -93,6 +100,9 @@ type FieldData struct {
 
 // Prepare 校验请求并推导模板渲染数据
 func Prepare(req GenRequest) (*Data, error) {
+	if req.ObjectKey != "" && !nameRe.MatchString(req.ObjectKey) {
+		return nil, errors.New("业务对象键不合法")
+	}
 	if !nameRe.MatchString(req.TableName) {
 		return nil, errors.New("表名不合法: 仅支持小写字母/数字/下划线且以字母开头")
 	}
@@ -199,6 +209,40 @@ func Prepare(req GenRequest) (*Data, error) {
 	if !hasForm {
 		return nil, errors.New("至少需要一个表单字段")
 	}
+	d.ObjectKey = req.ObjectKey
+	if d.ObjectKey == "" {
+		d.ObjectKey = req.TableName
+	}
+	fields := map[string]any{}
+	for i, f := range req.Fields {
+		fd := d.Fields[i]
+		kind := "string"
+		switch f.Type {
+		case "int":
+			kind = "integer"
+		case "float":
+			kind = "number"
+		case "bool":
+			kind = "boolean"
+		}
+		field := map[string]any{"type": kind, "title": f.Title, "required": f.Required, "x-ui": map[string]any{"control": fd.FormControl}, "x-fde": map[string]any{"type": f.Type, "sort": i, "inForm": f.InForm, "inList": f.InList, "column": f.Name}}
+		for _, key := range []string{"minLength", "maxLength", "minimum", "maximum", "pattern", "enum", "default"} {
+			if value, ok := f.Rules[key]; ok {
+				field[key] = value
+			}
+		}
+		if f.Type == "datetime" {
+			field["format"] = "date-time"
+		}
+		fields[fd.JSONName] = field
+	}
+	schema := map[string]any{"objectKey": d.ObjectKey, "name": d.Business, "version": 1, "fields": fields}
+	raw, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+	d.SchemaJSON = string(raw)
+	d.SchemaLiteral = strconv.Quote(string(raw))
 	return d, nil
 }
 
@@ -294,4 +338,11 @@ func Render(d *Data) ([]FileResult, error) {
 		files = append(files, FileResult{Path: t.path, Content: content})
 	}
 	return files, nil
+}
+
+// RenderBusiness creates managed pages using the shared runtime FormRender.
+func RenderBusiness(d *Data) ([]FileResult, error) {
+	copy := *d
+	copy.SchemaDriven = true
+	return Render(&copy)
 }

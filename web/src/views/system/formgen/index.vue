@@ -3,23 +3,23 @@
     <div class="page-toolbar">
       <span class="panel-title">表单 Schema 编辑器</span>
       <div class="toolbar-spacer" />
-      <el-input v-model="objectKey" placeholder="objectKey，如 biz_customer" class="toolbar-input object-key-input" clearable />
-      <el-button type="primary" :icon="Refresh" :loading="loading" @click="loadRemoteSchema">拉取 schema</el-button>
-      <el-button :icon="RefreshLeft" @click="useMockSchema">重置示例</el-button>
-      <el-radio-group v-model="saveMode" size="small" class="save-mode">
-        <el-radio-button value="create">新建 POST</el-radio-button>
-        <el-radio-button value="update">更新 PUT</el-radio-button>
-      </el-radio-group>
-      <el-button type="success" :loading="saving" @click="saveSchema">保存</el-button>
+      <el-input v-model="objectKey" :disabled="busy" placeholder="objectKey，如 biz_customer" class="toolbar-input object-key-input" clearable />
+      <el-button type="primary" :icon="Refresh" :loading="loading" :disabled="busy" @click="loadRemoteSchema">加载草稿</el-button>
+      <el-button :icon="RefreshLeft" :disabled="busy" @click="useMockSchema">重置示例</el-button>
+      <el-button type="success" :loading="saving" :disabled="!parsedSchema || loading || activating" @click="saveSchema">保存草稿</el-button>
+      <el-button :disabled="activeVersion === 0 || !loadedKey" @click="viewActiveSchema">查看已激活版本</el-button>
+      <el-button type="warning" :disabled="!canActivate" :loading="activating" @click="activateSchema">激活已保存草稿</el-button>
     </div>
+    <el-alert :closable="false" type="info" :title="versionSummary + '。保存草稿不会改变已激活版本。'" />
 
-    <el-row :gutter="12" class="formgen-body">
+    <el-row :gutter="12" class="formgen-body" :inert="busy">
       <el-col :span="leftSpan">
         <div class="panel schema-panel">
           <el-tabs v-model="activeTab" class="schema-tabs" stretch>
             <el-tab-pane label="可视化编辑" name="visual">
               <div class="tab-body">
-                <SchemaEditor :model-value="currentSchema" @update:model-value="handleEditorUpdate" />
+                <SchemaEditor v-if="parsedSchema" :model-value="parsedSchema" @update:model-value="handleEditorUpdate" />
+                <el-alert v-else type="error" :closable="false" :title="parseError" />
               </div>
             </el-tab-pane>
             <el-tab-pane label="Schema JSON" name="json">
@@ -38,9 +38,9 @@
       <el-col :span="rightSpan">
         <div class="panel render-panel">
           <div class="page-toolbar">
-            <span class="panel-title">实时渲染</span>
+            <span class="panel-title">草稿预览</span>
             <div class="toolbar-spacer" />
-            <el-tag v-if="activeSource === 'remote'" type="success" size="small">远端 schema</el-tag>
+            <el-tag v-if="activeSource === 'remote'" type="success" size="small">草稿 v{{ draftVersion }}{{ dirty ? ' · 未保存修改' : '' }}</el-tag>
             <el-tag v-else type="info" size="small">内置示例</el-tag>
           </div>
           <div class="render-body">
@@ -55,18 +55,21 @@
         </div>
       </el-col>
     </el-row>
+    <el-dialog v-model="activeVisible" title="当前已激活 Schema（只读）" width="760px">
+      <pre class="active-json">{{ activeSchemaText }}</pre>
+    </el-dialog>
   </div>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Refresh, RefreshLeft } from '@element-plus/icons-vue'
-import { createFormgenObject, getFormgenSchema, updateFormgenObject } from '@/api/formgen'
-import type { FormgenObjectPayload } from '@/api/formgen'
+import { activateFormgenSchema, createFormgenObject, getFormgenSchema, updateFormgenObject } from '@/api/formgen'
 import FormRender from '@/components/form-render/FormRender.vue'
 import type { FormSchema } from '@/components/form-render/types'
 import SchemaEditor from './SchemaEditor.vue'
+import { cloneSchema, parseFormSchema, schemaToPayload } from './schema-payload'
 
 const MOCK_SCHEMA: FormSchema = {
   $schema: 'https://fde-admin/schema/form-v1',
@@ -102,7 +105,7 @@ const MOCK_SCHEMA: FormSchema = {
       minimum: 0,
       'x-ui': { control: 'number', step: 0.01, colSpan: 12 },
     },
-    ownerId: {
+    owner_id: {
       title: '负责人',
       type: 'integer',
       'x-ui': {
@@ -121,7 +124,7 @@ const MOCK_SCHEMA: FormSchema = {
       default: true,
       'x-ui': { control: 'switch', colSpan: 12 },
     },
-    orderedAt: {
+    ordered_at: {
       title: '下单时间',
       type: 'string',
       format: 'date-time',
@@ -155,24 +158,26 @@ const MOCK_SCHEMA: FormSchema = {
 
 const objectKey = ref('biz_customer')
 const schemaText = ref(JSON.stringify(MOCK_SCHEMA, null, 2))
-const currentSchema = ref<FormSchema>(JSON.parse(JSON.stringify(MOCK_SCHEMA)) as FormSchema)
 const model = ref<Record<string, any>>({})
 const loading = ref(false)
 const saving = ref(false)
 const activeSource = ref<'mock' | 'remote'>('mock')
 const activeTab = ref('visual')
-const saveMode = ref('create')
+const loadedKey = ref('')
+const draftVersion = ref(0)
+const activeVersion = ref(0)
+const activating = ref(false)
+const savedFingerprint = ref(JSON.stringify(MOCK_SCHEMA))
+const activeVisible = ref(false)
+const activeSchemaText = ref('')
+const busy = computed(() => loading.value || saving.value || activating.value)
 
 const leftSpan = computed(() => (activeTab.value === 'visual' ? 14 : 10))
 const rightSpan = computed(() => 24 - leftSpan.value)
 
 const parsedSchema = computed<FormSchema | null>(() => {
   try {
-    const parsed = JSON.parse(schemaText.value) as FormSchema
-    if (parsed && typeof parsed === 'object' && parsed.fields && typeof parsed.fields === 'object') {
-      return parsed
-    }
-    return null
+    return parseFormSchema(schemaText.value)
   } catch {
     return null
   }
@@ -180,23 +185,21 @@ const parsedSchema = computed<FormSchema | null>(() => {
 
 const parseError = computed(() => {
   try {
-    JSON.parse(schemaText.value)
+    parseFormSchema(schemaText.value)
     return ''
   } catch (error) {
     return error instanceof Error ? error.message : String(error)
   }
 })
 
-watch(schemaText, (text) => {
-  try {
-    const parsed = JSON.parse(text) as FormSchema
-    if (parsed && typeof parsed === 'object' && parsed.fields && typeof parsed.fields === 'object') {
-      currentSchema.value = parsed
-    }
-  } catch {
-    // 解析失败时保留上一个可用 schema，JSON 面板负责提示错误
-  }
-})
+const dirty = computed(() => !parsedSchema.value || JSON.stringify(parsedSchema.value) !== savedFingerprint.value)
+const canActivate = computed(() => !!loadedKey.value && draftVersion.value > activeVersion.value
+  && !dirty.value && !saving.value && !loading.value && !activating.value)
+const versionSummary = computed(() => loadedKey.value
+  ? `草稿 v${draftVersion.value}；${activeVersion.value > 0 ? '已激活 v' + activeVersion.value : '尚未激活'}${dirty.value ? '；有未保存修改' : ''}`
+  : '当前为未保存示例')
+
+watch(parsedSchema, (schema) => { if (schema) syncModelDefaults(schema) })
 
 function defaultValueFor(field: FormSchema['fields'][string]): any {
   if (field.default !== undefined) return field.default
@@ -234,10 +237,13 @@ function syncModelDefaults(schema: FormSchema): void {
 
 function applySchema(schema: FormSchema, source: 'mock' | 'remote'): void {
   schemaText.value = JSON.stringify(schema, null, 2)
-  currentSchema.value = JSON.parse(JSON.stringify(schema)) as FormSchema
   model.value = buildModel(schema)
   activeSource.value = source
-  saveMode.value = source === 'remote' ? 'update' : 'create'
+  objectKey.value = schema.objectKey
+  loadedKey.value = source === 'remote' ? schema.objectKey : ''
+  draftVersion.value = source === 'remote' ? schema.version ?? 0 : 0
+  activeVersion.value = source === 'remote' ? schema.activeVersion ?? 0 : 0
+  savedFingerprint.value = JSON.stringify(schema)
 }
 
 function handleModelUpdate(value: Record<string, any>): void {
@@ -245,52 +251,43 @@ function handleModelUpdate(value: Record<string, any>): void {
 }
 
 function handleEditorUpdate(schema: FormSchema): void {
-  currentSchema.value = schema
   schemaText.value = JSON.stringify(schema, null, 2)
   syncModelDefaults(schema)
 }
 
-function useMockSchema(): void {
-  applySchema(JSON.parse(JSON.stringify(MOCK_SCHEMA)) as FormSchema, 'mock')
+async function confirmDiscard(): Promise<boolean> {
+  if (!dirty.value) return true
+  try { await ElMessageBox.confirm('将放弃当前未保存的修改，继续？', '切换草稿', { type: 'warning' }); return true } catch { return false }
+}
+
+async function useMockSchema(): Promise<void> {
+  if (!await confirmDiscard()) return
+  applySchema(cloneSchema(MOCK_SCHEMA), 'mock')
   ElMessage.info('已使用内置示例 schema')
 }
 
 async function loadRemoteSchema(): Promise<void> {
-  const key = objectKey.value.trim() || 'biz_customer'
+  const key = objectKey.value.trim()
+  if (!key) { ElMessage.warning('请填写要加载的 objectKey'); return }
+  if (!await confirmDiscard()) return
   loading.value = true
   try {
-    const data = await getFormgenSchema(key)
+    const data = await getFormgenSchema(key, 'draft')
     if (data && data.fields) {
       applySchema(data, 'remote')
-      ElMessage.success('已加载后端 schema')
+      ElMessage.success('已加载草稿，当前已激活版本保持不变')
       return
     }
-    useMockSchema()
+    ElMessage.error('后端返回的草稿格式不可用')
   } catch {
-    useMockSchema()
+    // 请求层已展示错误，保留用户当前内容，不用示例覆盖。
   } finally {
     loading.value = false
   }
 }
 
-function buildPayload(schema: FormSchema): FormgenObjectPayload {
-  const fields = Object.entries(schema.fields ?? {}).map(([name, field]) => ({
-    name,
-    title: field.title,
-    type: (field.type ?? 'string') as FormgenObjectPayload['fields'][number]['type'],
-    required: field.required === true,
-    'x-ui': field['x-ui'] ? { ...field['x-ui'] } : undefined,
-  }))
-  return {
-    objectKey: schema.objectKey,
-    name: schema.name,
-    fields,
-    mode: saveMode.value as 'create' | 'update',
-  }
-}
-
 async function saveSchema(): Promise<void> {
-  const schema = currentSchema.value
+  const schema = parsedSchema.value
   if (!schema || !schema.fields) {
     ElMessage.warning('schema 不可用')
     return
@@ -307,28 +304,66 @@ async function saveSchema(): Promise<void> {
     ElMessage.warning('请至少添加一个字段')
     return
   }
+  if (loadedKey.value && loadedKey.value !== schema.objectKey) {
+    ElMessage.warning('已加载对象的 objectKey 不可更改；请重置示例后新建其他对象')
+    return
+  }
+  let payload
+  try {
+    payload = schemaToPayload(schema, loadedKey.value ? 'update' : 'create', draftVersion.value)
+  } catch (error) {
+    ElMessage.warning((error as Error).message)
+    return
+  }
   saving.value = true
   try {
-    const payload = buildPayload(schema)
-    if (saveMode.value === 'create') {
-      await createFormgenObject(payload)
-    } else {
-      await updateFormgenObject(schema.objectKey, payload)
-    }
-    ElMessage.success('保存成功')
+    const saved = loadedKey.value
+      ? await updateFormgenObject(schema.objectKey, payload)
+      : await createFormgenObject(payload)
+    applySchema({ ...saved.schema, version: saved.object.version, activeVersion: saved.object.activeVersion }, 'remote')
+    ElMessage.success('草稿已保存，尚未激活')
   } catch (error) {
     const status = (error as any)?.response?.status
     if (status === 404) {
-      ElMessage.error('保存接口不存在（404）：后端 P4a 对象接口尚未就绪，请稍后重试')
+      ElMessage.error('对象不存在，请重新加载草稿后重试')
     }
   } finally {
     saving.value = false
   }
 }
 
+async function viewActiveSchema(): Promise<void> {
+  try {
+    const schema = await getFormgenSchema(loadedKey.value)
+    activeSchemaText.value = JSON.stringify(schema, null, 2)
+    activeVisible.value = true
+  } catch { /* 请求层展示错误，保持草稿。 */ }
+}
+
+async function activateSchema(): Promise<void> {
+  if (!canActivate.value) return
+  const key = loadedKey.value
+  const version = draftVersion.value
+  const expectedActiveVersion = activeVersion.value
+  try {
+    await ElMessageBox.confirm(`将激活 ${key} 的草稿 v${version}，当前已激活版本为 ${expectedActiveVersion || '无'}。继续？`, '激活草稿', { type: 'warning' })
+  } catch { return }
+  if (!canActivate.value || loadedKey.value !== key || draftVersion.value !== version) return
+  activating.value = true
+  try {
+    const activated = await activateFormgenSchema(key, { version, expectedActiveVersion })
+    activeVersion.value = activated.object.activeVersion
+    // 当前编辑内容是已保存的同一草稿，不用较旧的激活版本替换草稿。
+    const current = parsedSchema.value
+    if (current) applySchema({ ...current, activeVersion: activated.object.activeVersion }, 'remote')
+    ElMessage.success(`已激活 v${version}`)
+  } catch {
+    // 激活失败时保留草稿及原 active 版本，重新加载可获取远端最新状态。
+  } finally { activating.value = false }
+}
+
 onMounted(() => {
   model.value = buildModel(MOCK_SCHEMA)
-  loadRemoteSchema()
 })
 </script>
 
@@ -373,6 +408,7 @@ onMounted(() => {
   font-size: 12px;
   line-height: 1.5;
 }
+.active-json { max-height: 60vh; overflow: auto; white-space: pre-wrap; }
 .render-body {
   flex: 1;
   overflow: auto;

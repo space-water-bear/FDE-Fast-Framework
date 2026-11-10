@@ -17,7 +17,8 @@
           @click="selectSession(s)"
         >
           <span class="chat-session-title">{{ s.title }}</span>
-          <el-icon class="chat-session-del" @click.stop="handleDeleteSession(s)"><Close /></el-icon>
+          <el-tag v-if="s.userId === 0" size="small" type="info">机器人历史</el-tag>
+          <el-icon v-if="s.canDelete !== false" class="chat-session-del" @click.stop="handleDeleteSession(s)"><Close /></el-icon>
         </div>
         <div v-if="sessions.length === 0" class="chat-empty">暂无会话，选择智能体后新建</div>
       </el-scrollbar>
@@ -37,27 +38,29 @@
         <span>{{ currentSession ? currentSession.title : '请选择或新建会话' }}</span>
         <span class="chat-header-right">
           <span v-if="currentSession" class="chat-agent-name">{{ agentName(currentSession.agentId) }}</span>
-          <template v-if="currentSession">
+          <el-tag v-if="isBotHistory" type="info" size="small">只读历史</el-tag>
+          <template v-if="currentSession && !isBotHistory">
             <el-button link :icon="Edit" @click="handleRename">重命名</el-button>
             <el-button link type="danger" @click="handleClear">清空</el-button>
           </template>
         </span>
       </div>
       <div ref="msgBox" class="chat-messages">
-        <div v-if="messages.length === 0" class="chat-empty">发送一条消息开始对话</div>
+        <div v-if="messages.length === 0" class="chat-empty">{{ isBotHistory ? '暂无机器人消息' : '发送一条消息开始对话' }}</div>
         <div v-for="m in messages" :key="m.id" class="chat-msg" :class="m.role">
           <div class="chat-bubble"><markdown-view :content="m.content" /></div>
           <div class="chat-msg-actions">
             <el-button link size="small" @click="copyText(m.content)">复制</el-button>
-            <el-button v-if="m.role === 'user'" link size="small" @click="handleEditResend(m)">编辑重发</el-button>
-            <el-button v-if="m.role === 'assistant' && isLastAssistant(m)" link size="small" @click="handleRegenerate">重新生成</el-button>
+            <el-button v-if="!isBotHistory && m.role === 'user'" link size="small" @click="handleEditResend(m)">编辑重发</el-button>
+            <el-button v-if="!isBotHistory && m.role === 'assistant' && isLastAssistant(m)" link size="small" @click="handleRegenerate">重新生成</el-button>
           </div>
         </div>
-        <div v-if="sending" class="chat-msg assistant">
+        <div v-if="sending && !isBotHistory" class="chat-msg assistant">
           <div class="chat-bubble">正在思考...</div>
         </div>
       </div>
-      <div class="chat-input">
+      <div v-if="isBotHistory" class="chat-history-notice">请在原平台继续对话。</div>
+      <div v-else class="chat-input">
         <el-input
           v-model="inputText"
           type="textarea"
@@ -76,7 +79,7 @@
 </template>
 
 <script setup lang="ts">
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Close, Edit } from '@element-plus/icons-vue'
 import {
@@ -95,11 +98,14 @@ import type { AiAgentItem, AiMessageItem, AiSessionItem } from '@/api/ai'
 import MarkdownView from '@/components/MarkdownView.vue'
 
 const agents = ref<AiAgentItem[]>([])
-const sessions = ref<AiSessionItem[]>([])
+type SessionListItem = AiSessionItem & { canDelete?: boolean }
+
+const sessions = ref<SessionListItem[]>([])
 const messages = ref<AiMessageItem[]>([])
 const selectedAgentId = ref<number | undefined>(undefined)
 const currentSessionId = ref<number | null>(null)
-const currentSession = ref<AiSessionItem | null>(null)
+const currentSession = ref<SessionListItem | null>(null)
+const isBotHistory = computed(() => currentSession.value?.userId === 0)
 const inputText = ref('')
 const sending = ref(false)
 const keyword = ref('')
@@ -130,10 +136,12 @@ function handleSearch() {
   loadSessions()
 }
 
-async function selectSession(s: AiSessionItem) {
+async function selectSession(s: SessionListItem) {
   currentSession.value = s
   currentSessionId.value = s.id
+  messages.value = []
   const data = await listAiMessages(s.id)
+  if (currentSessionId.value !== s.id) return
   messages.value = data.list
   scrollBottom()
 }
@@ -150,7 +158,7 @@ async function handleNewSession() {
 
 async function handleSend() {
   const content = inputText.value.trim()
-  if (!content || !currentSessionId.value || sending.value) return
+  if (!content || !currentSessionId.value || sending.value || isBotHistory.value) return
   const sid = currentSessionId.value
   inputText.value = ''
   messages.value.push({ id: Date.now(), sessionId: sid, role: 'user', content, createdAt: '' })
@@ -161,6 +169,7 @@ async function handleSend() {
   abortCtrl = new AbortController()
   try {
     await streamChatAi(sid, content, (delta) => {
+      if (currentSessionId.value !== sid) return
       assistant.content += delta
       scrollBottom()
     }, abortCtrl.signal)
@@ -206,10 +215,12 @@ function isLastAssistant(m: AiMessageItem): boolean {
 }
 
 async function handleRegenerate() {
-  if (!currentSessionId.value || sending.value) return
+  const sid = currentSessionId.value
+  if (!sid || sending.value || isBotHistory.value) return
   sending.value = true
   try {
-    const msg = await regenerateAiSession(currentSessionId.value)
+    const msg = await regenerateAiSession(sid)
+    if (currentSessionId.value !== sid) return
     const idx = lastAssistantIdx()
     if (idx >= 0) messages.value.splice(idx, 1)
     messages.value.push(msg)
@@ -220,38 +231,47 @@ async function handleRegenerate() {
 }
 
 async function handleEditResend(m: AiMessageItem) {
-  if (!currentSessionId.value || sending.value) return
+  const sid = currentSessionId.value
+  if (!sid || m.sessionId !== sid || sending.value || isBotHistory.value) return
+  let content: string
   try {
     const { value } = await ElMessageBox.prompt('编辑消息内容', '编辑重发', {
       inputValue: m.content,
       inputType: 'textarea',
     })
-    if (!value || !value.trim()) return
-    sending.value = true
-    const reply = await resendAiMessage(currentSessionId.value, m.id, value.trim())
+    content = value.trim()
+  } catch {
+    return
+  }
+  if (!content || currentSessionId.value !== sid || sending.value || isBotHistory.value) return
+  sending.value = true
+  try {
+    const reply = await resendAiMessage(sid, m.id, content)
+    if (currentSessionId.value !== sid) return
     const idx = messages.value.findIndex((x) => x.id === m.id)
     if (idx >= 0) {
-      messages.value[idx].content = value.trim()
+      messages.value[idx].content = content
       messages.value.splice(idx + 1)
     }
     messages.value.push(reply)
     scrollBottom()
   } catch {
-    /* 用户取消 */
+    // Request errors are displayed by the interceptor.
   } finally {
     sending.value = false
   }
 }
 
 async function handleRename() {
-  if (!currentSession.value) return
+  const session = currentSession.value
+  if (!session || isBotHistory.value) return
   try {
     const { value } = await ElMessageBox.prompt('新的会话标题', '重命名', {
-      inputValue: currentSession.value.title,
+      inputValue: session.title,
     })
-    if (!value || !value.trim()) return
-    await renameAiSession(currentSession.value.id, value.trim())
-    currentSession.value.title = value.trim()
+    if (!value || !value.trim() || currentSessionId.value !== session.id) return
+    await renameAiSession(session.id, value.trim())
+    session.title = value.trim()
     loadSessions()
   } catch {
     /* 用户取消 */
@@ -259,11 +279,13 @@ async function handleRename() {
 }
 
 async function handleClear() {
-  if (!currentSessionId.value) return
+  const sid = currentSessionId.value
+  if (!sid || isBotHistory.value) return
   try {
     await ElMessageBox.confirm('确定清空该会话的全部消息吗？', '提示', { type: 'warning' })
-    await clearAiSession(currentSessionId.value)
-    messages.value = []
+    if (currentSessionId.value !== sid) return
+    await clearAiSession(sid)
+    if (currentSessionId.value === sid) messages.value = []
     ElMessage.success('已清空')
   } catch {
     /* 用户取消 */
@@ -278,7 +300,8 @@ function scrollBottom() {
   })
 }
 
-function handleDeleteSession(s: AiSessionItem) {
+function handleDeleteSession(s: SessionListItem) {
+  if (s.canDelete === false) return
   ElMessageBox.confirm('确定删除会话「' + s.title + '」及其全部消息吗？', '提示', { type: 'warning' })
     .then(async () => {
       await deleteAiSession(s.id)
@@ -414,6 +437,11 @@ onMounted(async () => {
   color: #909399;
   font-size: 13px;
   margin-top: 40px;
+}
+.chat-history-notice {
+  padding: 12px 16px;
+  border-top: 1px solid var(--el-border-color-light);
+  color: var(--el-text-color-secondary);
 }
 .chat-input {
   display: flex;

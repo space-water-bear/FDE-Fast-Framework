@@ -220,6 +220,15 @@ func DeleteAiAgent(id uint) error {
 	if n > 0 {
 		return errors.New("仍有会话引用该智能体，请先删除相关会话")
 	}
+	// Bot configuration is part of the workbench schema.
+	if global.Config == nil || global.Config.App.Mode != "release" {
+		if err := global.DB.Model(&model.AiBot{}).Where("agent_id = ?", id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return errors.New("仍有机器人引用该智能体，请先修改或删除相关机器人")
+		}
+	}
 	return global.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.AiAgent{Base: model.Base{ID: id}}).Association("Skills").Clear(); err != nil {
 			return err
@@ -348,6 +357,23 @@ func DeleteAiMcpServer(id uint) error {
 // ---------- 会话 ----------
 
 func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int64, error) {
+	return listAiSessions(0, keyword, page, pageSize, false)
+}
+
+func ListAiSessionsForUser(userID uint, keyword string, page, pageSize int) ([]model.AiSession, int64, error) {
+	return ListAiSessionsForViewer(userID, keyword, page, pageSize, false)
+}
+
+// ListAiSessionsForViewer includes default-project bot history only when the
+// caller has already authorized that history view. External sessions use owner 0.
+func ListAiSessionsForViewer(userID uint, keyword string, page, pageSize int, includeBotHistory bool) ([]model.AiSession, int64, error) {
+	if userID == 0 {
+		return nil, 0, errors.New("未登录")
+	}
+	return listAiSessions(userID, keyword, page, pageSize, includeBotHistory)
+}
+
+func listAiSessions(userID uint, keyword string, page, pageSize int, includeBotHistory bool) ([]model.AiSession, int64, error) {
 	if page < 1 {
 		page = 1
 	}
@@ -355,6 +381,13 @@ func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int6
 		pageSize = 20
 	}
 	q := global.DB.Model(&model.AiSession{})
+	if userID != 0 {
+		if includeBotHistory {
+			q = q.Where("(user_id = ? OR (user_id = 0 AND COALESCE(project_id, 0) IN (0, ?)))", userID, model.DefaultProjectID)
+		} else {
+			q = q.Where("user_id = ?", userID)
+		}
+	}
 	if keyword != "" {
 		like := "%" + keyword + "%"
 		q = q.Where("title LIKE ?", like)
@@ -371,10 +404,14 @@ func ListAiSessions(keyword string, page, pageSize int) ([]model.AiSession, int6
 }
 
 func CreateAiSession(title string, agentID, userID uint) (*model.AiSession, error) {
+	return CreateAiSessionInProject(title, agentID, userID, model.DefaultProjectID)
+}
+
+func CreateAiSessionInProject(title string, agentID, userID, projectID uint) (*model.AiSession, error) {
 	if title == "" {
 		title = "新会话"
 	}
-	s := &model.AiSession{Title: title, AgentID: agentID, UserID: userID}
+	s := &model.AiSession{Title: title, AgentID: agentID, ProjectID: projectID, UserID: userID}
 	if err := global.DB.Create(s).Error; err != nil {
 		return nil, err
 	}
@@ -504,7 +541,7 @@ func saveUserMessage(sessionID uint, content string) error {
 }
 
 // runAgentAndSave 构建 Agent 并执行一轮对话, 保存助手消息
-func runAgentAndSave(sessionID uint, messages []*message.Message, ag *model.AiAgent, systemPrompt string) (*model.AiMessage, error) {
+func runAgentAndSave(ctx context.Context, sessionID uint, messages []*message.Message, ag *model.AiAgent, systemPrompt string) (*model.AiMessage, error) {
 	started := time.Now()
 	provider, err := loadProvider(ag)
 	if err != nil {
@@ -519,7 +556,7 @@ func runAgentAndSave(sessionID uint, messages []*message.Message, ag *model.AiAg
 		logChatResult(sessionID, provider.APIMode, started, 0, err)
 		return nil, err
 	}
-	resp, err := a.Run(context.Background(), messages).Collect()
+	resp, err := a.Run(ctx, messages).Collect()
 	if err != nil {
 		logChatResult(sessionID, provider.APIMode, started, 0, err)
 		return nil, err
@@ -571,6 +608,9 @@ func (t *schemaFuncTool) Description() string { return t.description }
 func (t *schemaFuncTool) Schema() any         { return t.schema }
 func (t *schemaFuncTool) ReturnSchema() any   { return map[string]any{"type": "object"} }
 func (t *schemaFuncTool) Call(ctx context.Context, args string) (any, error) {
+	if err := authorizeEngineeringTool(ctx, t.name, args); err != nil {
+		return nil, err
+	}
 	if t.call != nil {
 		return t.call(ctx, args)
 	}
@@ -841,6 +881,10 @@ func logChatResult(sessionID uint, mode string, started time.Time, chars int, er
 
 // ChatAi 会话对话: 保存用户消息 -> MAF-Go Agent(自动工具调用) -> 保存助手回复
 func ChatAi(sessionID uint, content string) (*model.AiMessage, error) {
+	return ChatAiWithContext(context.Background(), sessionID, content)
+}
+
+func ChatAiWithContext(ctx context.Context, sessionID uint, content string) (*model.AiMessage, error) {
 	if err := saveUserMessage(sessionID, content); err != nil {
 		return nil, err
 	}
@@ -848,11 +892,15 @@ func ChatAi(sessionID uint, content string) (*model.AiMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // RegenerateAiSession 重新生成最后一条助手回复
 func RegenerateAiSession(sessionID uint) (*model.AiMessage, error) {
+	return RegenerateAiSessionWithContext(context.Background(), sessionID)
+}
+
+func RegenerateAiSessionWithContext(ctx context.Context, sessionID uint) (*model.AiMessage, error) {
 	var lastUser model.AiMessage
 	if err := global.DB.Where("session_id = ? AND role = ?", sessionID, "user").Order("id desc").First(&lastUser).Error; err != nil {
 		return nil, errors.New("没有可重新生成的消息")
@@ -864,11 +912,15 @@ func RegenerateAiSession(sessionID uint) (*model.AiMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // ResendAiMessage 编辑用户消息后重发: 更新该消息并丢弃其后所有消息
 func ResendAiMessage(sessionID, messageID uint, content string) (*model.AiMessage, error) {
+	return ResendAiMessageWithContext(context.Background(), sessionID, messageID, content)
+}
+
+func ResendAiMessageWithContext(ctx context.Context, sessionID, messageID uint, content string) (*model.AiMessage, error) {
 	var msg model.AiMessage
 	if err := global.DB.Where("id = ? AND session_id = ? AND role = ?", messageID, sessionID, "user").First(&msg).Error; err != nil {
 		return nil, errors.New("消息不存在")
@@ -883,7 +935,7 @@ func ResendAiMessage(sessionID, messageID uint, content string) (*model.AiMessag
 	if err != nil {
 		return nil, err
 	}
-	return runAgentAndSave(sessionID, messages, ag, systemPrompt)
+	return runAgentAndSave(ctx, sessionID, messages, ag, systemPrompt)
 }
 
 // RenameAiSession 重命名会话
@@ -902,6 +954,16 @@ func ClearAiSession(sessionID uint) error {
 
 // StreamChatAiTo 流式对话(MAF-Go ResponseStream), 逐段回调 onDelta, 返回完整文本
 func StreamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta func(string)) (string, error) {
+	return streamChatAiTo(ctx, sessionID, content, onDelta, true)
+}
+
+// StreamChatAiBotTo provides external chat without lending the server's tool
+// credentials to an unmapped platform identity. Internal chat retains tools.
+func StreamChatAiBotTo(ctx context.Context, sessionID uint, content string) (string, error) {
+	return streamChatAiTo(ctx, sessionID, content, func(string) {}, false)
+}
+
+func streamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta func(string), enableTools bool) (string, error) {
 	started := time.Now()
 	if err := saveUserMessage(sessionID, content); err != nil {
 		logChatResult(sessionID, "", started, 0, err)
@@ -917,9 +979,12 @@ func StreamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta
 		logChatResult(sessionID, "", started, 0, err)
 		return "", err
 	}
-	mcpTools, closeMcp := buildMcpTools(ag)
-	defer closeMcp()
-	allTools := append(buildTools(ag), mcpTools...)
+	var allTools []tool.Tool
+	if enableTools {
+		mcpTools, closeMcp := buildMcpTools(ag)
+		defer closeMcp()
+		allTools = append(buildTools(ag), mcpTools...)
+	}
 	a, err := buildAgent(ag, provider, allTools, systemPrompt)
 	if err != nil {
 		logChatResult(sessionID, provider.APIMode, started, 0, err)
