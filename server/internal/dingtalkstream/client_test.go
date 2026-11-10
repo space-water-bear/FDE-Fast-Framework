@@ -503,7 +503,7 @@ func TestNetworkEOFStillPersistsAlreadyReadCallbacks(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
-	secondSent := make(chan struct{})
+	connectionClosed := make(chan struct{})
 	accepted := make(chan string, 2)
 	reconnected := make(chan struct{}, 1)
 	c, _ := localClient(t, testConfig(), func(frame Frame) bool {
@@ -533,11 +533,20 @@ func TestNetworkEOFStillPersistsAlreadyReadCallbacks(t *testing.T) {
 		if !writeFrame(t, conn, callbackFrame("second")) {
 			return
 		}
-		close(secondSent)
+		// The ping reply fences the second callback in the client's FIFO read loop
+		// while the application is still blocked on persisting the first one.
+		if !writeFrame(t, conn, pingFrame("before-eof")) {
+			return
+		}
+		if ack, err := readResponse(conn); err != nil || ack.Headers["messageId"] != "before-eof" {
+			t.Errorf("close fence ACK: %q, %v", ack.Headers["messageId"], err)
+			return
+		}
 		_ = conn.Close(websocket.StatusGoingAway, "rotation")
+		close(connectionClosed)
 	}, nil)
 	cancel, _ := runClient(t, c)
-	waitValue(t, secondSent)
+	waitValue(t, connectionClosed)
 	releaseOnce.Do(func() { close(release) })
 	if first, second := waitValue(t, accepted), waitValue(t, accepted); first != "first" || second != "second" {
 		t.Fatalf("EOF lost callback: %q %q", first, second)

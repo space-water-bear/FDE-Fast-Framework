@@ -220,11 +220,14 @@ func DeleteAiAgent(id uint) error {
 	if n > 0 {
 		return errors.New("仍有会话引用该智能体，请先删除相关会话")
 	}
-	if err := global.DB.Model(&model.AiBot{}).Where("agent_id = ?", id).Count(&n).Error; err != nil {
-		return err
-	}
-	if n > 0 {
-		return errors.New("仍有机器人引用该智能体，请先修改或删除相关机器人")
+	// Bot configuration is part of the workbench schema.
+	if global.Config == nil || global.Config.App.Mode != "release" {
+		if err := global.DB.Model(&model.AiBot{}).Where("agent_id = ?", id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n > 0 {
+			return errors.New("仍有机器人引用该智能体，请先修改或删除相关机器人")
+		}
 	}
 	return global.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.AiAgent{Base: model.Base{ID: id}}).Association("Skills").Clear(); err != nil {

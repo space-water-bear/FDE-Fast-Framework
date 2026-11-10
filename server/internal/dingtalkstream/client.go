@@ -386,6 +386,12 @@ func (c *Client) runConnection(ctx context.Context, endpoint string) (bool, erro
 				select {
 				case accepted <- result:
 				case <-networkClosedSignal:
+					// The drain loop still needs to observe the processed count.
+					// A full channel already has a result that will wake it.
+					select {
+					case accepted <- result:
+					default:
+					}
 				case <-sessionCtx.Done():
 					return
 				}
