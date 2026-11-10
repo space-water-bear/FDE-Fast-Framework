@@ -26,11 +26,17 @@ func setupTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("database handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	global.DB = db
 	global.Logger = zap.NewNop()
 	if err := db.AutoMigrate(
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{},
+		&model.AiBot{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}

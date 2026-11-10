@@ -65,7 +65,11 @@ func Run(cfg *config.Config) {
 		"登录设备菜单":      ensureDeviceMenu,
 		"文件管理菜单":      ensureFileMenu,
 		"表格示例菜单":      ensureTableDemoMenu,
+		"图表示例菜单":      ensureChartDemoMenu,
+		"图表生成技能":      ensureChartBuilderSkill,
+		"页面和业务生成技能":   ensureGenerationSkills,
 		"AI助手菜单":      ensureAiMenus,
+		"AI机器人菜单":     ensureAiBotMenu,
 		"AI流式聊天按钮":    ensureAiSessionStreamButton,
 		"AI用量统计菜单":    ensureAiUsageMenu,
 		"表单生成工具":      ensureFormgenAiTool,
@@ -105,9 +109,19 @@ func initDB(cfg *config.Config) error {
 		&model.ActiveToken{}, &model.JwtBlacklist{}, &model.File{},
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{}, &model.AiUsage{},
+		&model.AiBot{}, &model.AiBotConversation{}, &model.AiBotDelivery{},
+		&model.AiBotSendAttempt{},
 		&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{},
 	}, model.RegistryTables()...)
 	if err := db.AutoMigrate(models...); err != nil {
+		return err
+	}
+	// Both supported databases implement partial unique indexes. Empty Bot IDs
+	// on legacy HTTP records and DingTalk records are intentionally excluded.
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_wecom_bot_id ON sys_ai_bots (bot_id) WHERE platform = 'wecom' AND bot_id <> ''").Error; err != nil {
+		return err
+	}
+	if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_dingtalk_client_id ON sys_ai_bots (client_id) WHERE platform = 'dingtalk' AND client_id <> ''").Error; err != nil {
 		return err
 	}
 	global.DB = db

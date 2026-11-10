@@ -8,8 +8,14 @@
 并内置表单式代码生成器（可视化定义表与字段，一键生成前后端 CRUD）。
 
 前端通用组件文档：docs/components/table-page.md（表格页组件：左树 + 搜索表单 + vxe-grid 表格）。
+图表组件与技能：[ECharts 接入说明](docs/components/charts.md)（通用图表、折线/柱状/环形配置、带筛选的只读统计示例及内置生成技能）。
+页面与业务技能：[生成规范与使用说明](docs/ai-generation-skills.md)（组件契约、业务规则、接口权限、增量修改及实际工具边界）。
 API 前后端契约：docs/api-conventions.md（响应信封/业务码/鉴权/分页/错误处理约定）。
 AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Agent Framework for Go）。
+AI 机器人接入：[企业微信与钉钉](docs/ai-bots.md)（企业微信 Bot ID + Secret、[钉钉 Client ID + Secret 的 Stream 长连接](docs/dingtalk-stream.md)；飞书后续接入）；配置文档能力前请阅读[官方授权机制](https://developer.work.weixin.qq.com/document/path/101468)和[项目授权说明](docs/wecom-authorization.md)。
+企业微信协议检查：[官方长连接要求核对记录](docs/wecom-long-connection-audit.md)（文字问答范围、频控、流生命周期与验收边界）。
+钉钉协议检查：[Stream 官方要求核对记录](docs/dingtalk-stream-audit.md)（取票、心跳、断连排空、ACK、临时会话回复与接纳边界）。
+分阶段改造计划：[内置智能体业务开发与交付路线图](docs/agent-delivery-roadmap.md)（生成、增量修改、测试与部署）。
 
 ## 技术栈
 
@@ -25,6 +31,8 @@ AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Ag
 前端
 
     Vue 3.5 + Vite 5 + TypeScript + Element Plus + vxe-table + Pinia + Vue Router + Axios
+
+    Apache ECharts 6（按需注册；统一图表生命周期和加载/空数据/错误状态）
 
 ## 特性
 
@@ -55,6 +63,10 @@ AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Ag
 - 代码生成器：表单式定义表与字段，一键生成后端模型/服务/接口/路由 + 前端 API/页面，
   自动创建菜单与按钮权限并授给对应角色（内置 customer、product 两个生成示例）
 - 一键生成新项目：fde.sh 复制模板并替换模块名/应用名
+- ECharts 图表：BaseChart 通用组件、折线/柱状/环形配置与筛选统计示例；
+  内置 `fde-chart-builder` 技能可绑定到智能体，约定图表选择、数据口径和验证要求
+- 内置 `fde-page-builder` 与 `fde-business-logic` 技能：统一 TablePage/FormRender/Element Plus/ECharts
+  页面规范与后端校验、状态、权限、事务约定，按需组合绑定，保留已有技能编辑和绑定
 
 ## 快速开始
 

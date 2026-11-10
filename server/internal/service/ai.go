@@ -220,6 +220,12 @@ func DeleteAiAgent(id uint) error {
 	if n > 0 {
 		return errors.New("仍有会话引用该智能体，请先删除相关会话")
 	}
+	if err := global.DB.Model(&model.AiBot{}).Where("agent_id = ?", id).Count(&n).Error; err != nil {
+		return err
+	}
+	if n > 0 {
+		return errors.New("仍有机器人引用该智能体，请先修改或删除相关机器人")
+	}
 	return global.DB.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Model(&model.AiAgent{Base: model.Base{ID: id}}).Association("Skills").Clear(); err != nil {
 			return err
@@ -902,6 +908,16 @@ func ClearAiSession(sessionID uint) error {
 
 // StreamChatAiTo 流式对话(MAF-Go ResponseStream), 逐段回调 onDelta, 返回完整文本
 func StreamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta func(string)) (string, error) {
+	return streamChatAiTo(ctx, sessionID, content, onDelta, true)
+}
+
+// StreamChatAiBotTo provides external chat without lending the server's tool
+// credentials to an unmapped platform identity. Internal chat retains tools.
+func StreamChatAiBotTo(ctx context.Context, sessionID uint, content string) (string, error) {
+	return streamChatAiTo(ctx, sessionID, content, func(string) {}, false)
+}
+
+func streamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta func(string), enableTools bool) (string, error) {
 	started := time.Now()
 	if err := saveUserMessage(sessionID, content); err != nil {
 		logChatResult(sessionID, "", started, 0, err)
@@ -917,9 +933,12 @@ func StreamChatAiTo(ctx context.Context, sessionID uint, content string, onDelta
 		logChatResult(sessionID, "", started, 0, err)
 		return "", err
 	}
-	mcpTools, closeMcp := buildMcpTools(ag)
-	defer closeMcp()
-	allTools := append(buildTools(ag), mcpTools...)
+	var allTools []tool.Tool
+	if enableTools {
+		mcpTools, closeMcp := buildMcpTools(ag)
+		defer closeMcp()
+		allTools = append(buildTools(ag), mcpTools...)
+	}
 	a, err := buildAgent(ag, provider, allTools, systemPrompt)
 	if err != nil {
 		logChatResult(sessionID, provider.APIMode, started, 0, err)

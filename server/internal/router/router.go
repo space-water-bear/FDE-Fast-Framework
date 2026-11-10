@@ -27,6 +27,10 @@ func NewRouter() *gin.Engine {
 		c.Next()
 	})
 
+	// Platform callbacks authenticate with the robot's own signature/encryption.
+	apiGroup.GET("/ai/bot/callback/:id", api.AiBotCallback)
+	apiGroup.POST("/ai/bot/callback/:id", api.AiBotCallback)
+
 	// 认证: captcha/login/refresh 公开, userinfo/logout 只需登录
 	auth := apiGroup.Group("/auth")
 	auth.GET("/captcha", api.Captcha)
@@ -42,6 +46,8 @@ func NewRouter() *gin.Engine {
 	// 业务接口: JWT + casbin RBAC 双重校验
 	authed := apiGroup.Group("", middleware.JWTAuth(), middleware.CasbinAuth())
 	{
+		authed.GET("/demo/charts/sales", api.ChartDemoSales)
+
 		authed.GET("/user/list", api.ListUsers)
 		authed.POST("/user", api.CreateUser)
 		authed.PUT("/user/:id", api.UpdateUser)
@@ -88,6 +94,10 @@ func NewRouter() *gin.Engine {
 
 		ai := authed.Group("/ai")
 		{
+			ai.GET("/bot/list", api.ListAiBots)
+			ai.POST("/bot", api.SaveAiBot)
+			ai.PUT("/bot/:id", api.SaveAiBot)
+			ai.DELETE("/bot/:id", api.DeleteAiBot)
 			ai.GET("/provider/list", api.ListAiProviders)
 			ai.POST("/provider", api.CreateAiProvider)
 			ai.PUT("/provider/:id", api.UpdateAiProvider)
