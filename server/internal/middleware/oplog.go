@@ -49,14 +49,16 @@ type loggedRequestBody struct {
 func OperationLog() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		path := c.Request.URL.Path
-		if path == "/health" || path == "/api/auth/captcha" || strings.HasPrefix(path, "/api/oplog") {
+		if path == "/health" || path == "/api/auth/captcha" || strings.HasPrefix(path, "/api/oplog") || strings.HasPrefix(path, "/api/ai/bot/callback/") {
 			c.Next()
 			return
 		}
 		start := time.Now()
 
 		body := ""
-		if c.Request.Body != nil {
+		// Robot credentials are write-only; never copy their management payload
+		// into operation logs. Callbacks are also exempt from the 4 KiB log reader.
+		if c.Request.Body != nil && path != "/api/ai/bot" && !strings.HasPrefix(path, "/api/ai/bot/") {
 			raw, _ := io.ReadAll(io.LimitReader(c.Request.Body, maxLogBody))
 			c.Request.Body = &loggedRequestBody{Reader: io.MultiReader(bytes.NewReader(raw), c.Request.Body), Closer: c.Request.Body}
 			body = maskRe.ReplaceAllString(string(raw), `"$1":"***"`)

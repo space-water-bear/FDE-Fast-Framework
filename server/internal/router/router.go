@@ -39,6 +39,12 @@ func NewRouter() *gin.Engine {
 		c.Next()
 	})
 
+	if global.Config.App.Mode != "release" {
+		// Keep the retired callbacks' response in the workbench.
+		apiGroup.GET("/ai/bot/callback/:id", api.AiBotCallback)
+		apiGroup.POST("/ai/bot/callback/:id", api.AiBotCallback)
+	}
+
 	// 认证: captcha/login/refresh 公开, userinfo/logout 只需登录
 	auth := apiGroup.Group("/auth")
 	auth.GET("/captcha", api.Captcha)
@@ -71,6 +77,7 @@ func NewRouter() *gin.Engine {
 		authed.DELETE("/menu/:id", api.DeleteMenu)
 
 		if global.Config.App.Mode != "release" {
+			authed.GET("/demo/charts/sales", api.ChartDemoSales)
 			authed.GET("/codegen/options", api.CodegenOptions)
 			authed.POST("/codegen/preview", api.CodegenPreview)
 			authed.POST("/codegen/generate", api.CodegenGenerate)
@@ -117,6 +124,12 @@ func NewRouter() *gin.Engine {
 
 		ai := authed.Group("/ai")
 		{
+			if global.Config.App.Mode != "release" {
+				ai.GET("/bot/list", api.ListAiBots)
+				ai.POST("/bot", api.SaveAiBot)
+				ai.PUT("/bot/:id", api.SaveAiBot)
+				ai.DELETE("/bot/:id", api.DeleteAiBot)
+			}
 			ai.GET("/provider/list", api.ListAiProviders)
 			ai.POST("/provider", api.CreateAiProvider)
 			ai.PUT("/provider/:id", api.UpdateAiProvider)

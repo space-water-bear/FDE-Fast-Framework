@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -75,20 +77,37 @@ func run() error {
 			return fmt.Errorf("workbench仅用于开发；运行交付产物请显式使用serve --manifest")
 		}
 		initialize.Run(cfg)
+	}
+
+	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.App.Port), Handler: router.NewRouter(), ReadHeaderTimeout: 10 * time.Second}
+	listener, err := net.Listen("tcp", server.Addr)
+	if err != nil {
+		return fmt.Errorf("启动监听失败: %w", err)
+	}
+	defer listener.Close()
+	if command == "workbench" {
 		if err := service.StartDevelopmentWorker(ctx); err != nil {
 			return err
 		}
+		stopWeCom := service.StartWeComBots(ctx)
+		defer stopWeCom()
+		stopDingTalk := service.StartDingTalkBots(ctx)
+		defer stopDingTalk()
 	}
-	server := &http.Server{Addr: fmt.Sprintf(":%d", cfg.App.Port), Handler: router.NewRouter(), ReadHeaderTimeout: 10 * time.Second}
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = server.Shutdown(shutdown)
-	}()
+
 	log.Printf("%s listening on %s", cfg.App.Name, server.Addr)
-	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		return err
+	serverErr := make(chan error, 1)
+	go func() { serverErr <- server.Serve(listener) }()
+	var runErr error
+	select {
+	case err := <-serverErr:
+		if !errors.Is(err, http.ErrServerClosed) {
+			runErr = err
+		}
+		stop()
+	case <-ctx.Done():
 	}
-	return nil
+	shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return errors.Join(runErr, server.Shutdown(shutdown))
 }

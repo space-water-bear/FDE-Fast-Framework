@@ -179,6 +179,22 @@ func TestDevelopmentDockerFirstDelivery(t *testing.T) {
 		t.Fatal("missing actual deployment/first login")
 	}
 	token := acceptanceLogin(t, deployed.URL, deployed.Credentials["username"], deployed.Credentials["password"])
+	client := &http.Client{Timeout: 5 * time.Second}
+	for _, path := range []string{"/api/dev/projects", "/api/ai/bot/list", "/api/demo/charts/sales"} {
+		probe, err := http.NewRequestWithContext(ctx, http.MethodGet, deployed.URL+path, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		probe.Header.Set("x-token", token)
+		response, err := client.Do(probe)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response.Body.Close()
+		if response.StatusCode != http.StatusNotFound {
+			t.Fatalf("workbench endpoint %s exposed by release: HTTP %d", path, response.StatusCode)
+		}
+	}
 	request := map[string]any{"ticketNo": "QA-001", "description": "验收维修记录", "status": "open", "owner": "演示负责人", "reportedAt": time.Now().UTC().Format(time.RFC3339)}
 	created := acceptanceRequest(t, "POST", deployed.URL+"/api/repair_ticket", token, request, 200, 0)
 	id := created["data"].(map[string]any)["id"].(float64)

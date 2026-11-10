@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"fde-admin/internal/global"
 	"fde-admin/internal/model"
 	"fde-admin/internal/service"
 	"fde-admin/internal/utils"
@@ -352,20 +353,56 @@ type aiChatReq struct {
 	Content string `json:"content" binding:"required"`
 }
 
+type aiSessionListItem struct {
+	model.AiSession
+	CanDelete bool `json:"canDelete"`
+}
+
 func ListAiSessions(c *gin.Context) {
 	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
 	pageSize, _ := strconv.Atoi(c.DefaultQuery("pageSize", "20"))
 	claims := utils.GetClaims(c)
-	if claims == nil {
+	if claims == nil || claims.UserID == 0 {
 		utils.NoAuth(c, "未登录")
 		return
 	}
-	list, total, err := service.ListAiSessionsForUser(claims.UserID, c.Query("keyword"), page, pageSize)
+	includeBotHistory := isAiSessionHistoryAdmin(claims.UserID)
+	list, total, err := service.ListAiSessionsForViewer(claims.UserID, c.Query("keyword"), page, pageSize, includeBotHistory)
 	if err != nil {
 		utils.Fail(c, err.Error())
 		return
 	}
-	utils.OK(c, gin.H{"list": list, "total": total})
+	bound, err := boundBotSessionIDs(list)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	items := make([]aiSessionListItem, 0, len(list))
+	for _, session := range list {
+		items = append(items, aiSessionListItem{AiSession: session, CanDelete: !bound[session.ID]})
+	}
+	utils.OK(c, gin.H{"list": items, "total": total})
+}
+
+func boundBotSessionIDs(sessions []model.AiSession) (map[uint]bool, error) {
+	ids := []uint{}
+	for _, session := range sessions {
+		if isBotHistorySession(session) {
+			ids = append(ids, session.ID)
+		}
+	}
+	bound := make(map[uint]bool)
+	if len(ids) == 0 {
+		return bound, nil
+	}
+	var linked []uint
+	if err := global.DB.Model(&model.AiBotConversation{}).Where("session_id IN ?", ids).Pluck("session_id", &linked).Error; err != nil {
+		return nil, err
+	}
+	for _, id := range linked {
+		bound[id] = true
+	}
+	return bound, nil
 }
 
 func CreateAiSession(c *gin.Context) {
@@ -403,7 +440,17 @@ func DeleteAiSession(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
-	if _, ok := ownedAiSessionContext(c, id); !ok {
+	session, ok := readableAiSession(c, id)
+	if !ok {
+		return
+	}
+	bound, err := boundBotSessionIDs([]model.AiSession{session})
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	if bound[id] {
+		utils.Forbidden(c, "机器人仍关联此会话，当前只能查看历史")
 		return
 	}
 	if err := service.DeleteAiSession(id); err != nil {
@@ -419,7 +466,7 @@ func ListAiMessages(c *gin.Context) {
 		utils.Fail(c, "参数错误")
 		return
 	}
-	if _, ok := ownedAiSessionContext(c, id); !ok {
+	if _, ok := readableAiSession(c, id); !ok {
 		return
 	}
 	list, err := service.ListAiMessages(id)

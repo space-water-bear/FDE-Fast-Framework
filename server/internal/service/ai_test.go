@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/glebarez/sqlite"
@@ -26,22 +27,31 @@ func setupTestDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("database handle: %v", err)
+	}
+	t.Cleanup(func() { _ = sqlDB.Close() })
 	global.DB = db
 	global.Logger = zap.NewNop()
 	if err := db.AutoMigrate(
 		&model.AiProvider{}, &model.AiAgent{}, &model.AiSkill{}, &model.AiTool{},
 		&model.AiMcpServer{}, &model.AiSession{}, &model.AiMessage{},
+		&model.AiBot{},
 	); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 }
 
 // newMockGateway 模拟 OpenAI 兼容网关(chat/completions + responses, 含流式与工具调用)
-func newMockGateway() *httptest.Server {
+func newMockGateway(observers ...func(map[string]any)) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		var data map[string]any
 		_ = json.Unmarshal(body, &data)
+		for _, observe := range observers {
+			observe(data)
+		}
 
 		if r.URL.Path == "/v1/chat/completions" {
 			if stream, _ := data["stream"].(bool); stream {
@@ -207,6 +217,103 @@ func TestStreamChatAiTo(t *testing.T) {
 	}
 	if got.String() != full {
 		t.Fatalf("callback mismatch: %s vs %s", got.String(), full)
+	}
+}
+
+func TestBotChatDoesNotAdvertiseToolsOrConnectMCP(t *testing.T) {
+	setupTestDB(t)
+	var modelCalls, advertisedTools, mcpCalls atomic.Int32
+	gateway := newMockGateway(func(request map[string]any) {
+		tools, _ := request["tools"].([]any)
+		advertisedTools.Store(int32(len(tools)))
+		modelCalls.Add(1)
+	})
+	t.Cleanup(gateway.Close)
+	mcpEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mcpCalls.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(mcpEndpoint.Close)
+	if err := SaveAiTool(0, "get_weather", "查询天气", "{}", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveAiMcpServer(0, "ConfiguredMCP", "streamable", mcpEndpoint.URL, "", "", "", true, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := CreateAiProvider("Mock", gateway.URL+"/v1", "mock-key", "chat", "model-a", 0.7, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	tools, err := ListAiTools("")
+	if err != nil || len(tools) != 1 {
+		t.Fatalf("tool fixture: %v", err)
+	}
+	mcps, err := ListAiMcpServers("")
+	if err != nil || len(mcps) != 1 {
+		t.Fatalf("MCP fixture: %v", err)
+	}
+	providers, err := ListAiProviders("")
+	if err != nil || len(providers) != 1 {
+		t.Fatalf("provider fixture: %v", err)
+	}
+	if err := CreateAiAgent("内外部共用助手", "你是助手", providers[0].ID, 0.5, true, "", nil, []uint{tools[0].ID}, []uint{mcps[0].ID}); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := ListAiAgents("")
+	if err != nil || len(agents) != 1 {
+		t.Fatalf("agent fixture: %v", err)
+	}
+	bot, err := CreateAiSession("机器人会话", agents[0].ID, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reply, err := StreamChatAiBotTo(context.Background(), bot.ID, "查天气"); err != nil || reply != "chat流式输出" {
+		t.Fatalf("external chat did not receive a reply: %q, %v", reply, err)
+	}
+	if modelCalls.Load() != 1 || advertisedTools.Load() != 0 || mcpCalls.Load() != 0 {
+		t.Fatalf("external tool exposure: model=%d tools=%d MCP=%d", modelCalls.Load(), advertisedTools.Load(), mcpCalls.Load())
+	}
+	human, err := CreateAiSession("本地会话", agents[0].ID, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := StreamChatAiTo(context.Background(), human.ID, "查天气", func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	if modelCalls.Load() != 2 || advertisedTools.Load() != 1 || mcpCalls.Load() == 0 {
+		t.Fatalf("local tool regression: model=%d tools=%d MCP=%d", modelCalls.Load(), advertisedTools.Load(), mcpCalls.Load())
+	}
+}
+
+func TestListAiSessionsForViewerKeepsBotHistoryAndOwnership(t *testing.T) {
+	setupTestDB(t)
+	fixtures := []model.AiSession{
+		{Title: "我的会话", UserID: 1, ProjectID: 2},
+		{Title: "别人的会话", UserID: 2, ProjectID: model.DefaultProjectID},
+		{Title: "删除机器人后改名的历史", UserID: 0, ProjectID: model.DefaultProjectID},
+		{Title: "非默认项目无主会话", UserID: 0, ProjectID: 2},
+		{Title: "旧机器人会话", UserID: 0, ProjectID: model.DefaultProjectID},
+	}
+	if err := global.DB.Create(&fixtures).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := global.DB.Model(&fixtures[4]).Update("project_id", 0).Error; err != nil {
+		t.Fatal(err)
+	}
+	owned, total, err := ListAiSessionsForUser(1, "", 1, 20)
+	if err != nil || total != 1 || len(owned) != 1 || owned[0].ID != fixtures[0].ID {
+		t.Fatalf("unexpected own sessions: %v total=%d err=%v", owned, total, err)
+	}
+	withHistory, total, err := ListAiSessionsForViewer(1, "", 1, 20, true)
+	if err != nil || total != 3 || len(withHistory) != 3 {
+		t.Fatalf("unexpected history sessions: %v total=%d err=%v", withHistory, total, err)
+	}
+	for i, want := range []uint{fixtures[4].ID, fixtures[2].ID, fixtures[0].ID} {
+		if withHistory[i].ID != want {
+			t.Fatalf("session %d = %d, want %d", i, withHistory[i].ID, want)
+		}
+	}
+	if _, _, err := ListAiSessionsForViewer(0, "", 1, 20, true); err == nil {
+		t.Fatal("ownerless caller received a history view")
 	}
 }
 

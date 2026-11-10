@@ -68,7 +68,11 @@ func Run(cfg *config.Config) {
 		"登录设备菜单":      ensureDeviceMenu,
 		"文件管理菜单":      ensureFileMenu,
 		"表格示例菜单":      ensureTableDemoMenu,
+		"图表示例菜单":      ensureChartDemoMenu,
+		"图表生成技能":      ensureChartBuilderSkill,
+		"页面和业务生成技能":   ensureGenerationSkills,
 		"AI助手菜单":      ensureAiMenus,
+		"AI机器人菜单":     ensureAiBotMenu,
 		"AI流式聊天按钮":    ensureAiSessionStreamButton,
 		"AI用量统计菜单":    ensureAiUsageMenu,
 		"表单生成工具":      ensureFormgenAiTool,
@@ -120,11 +124,24 @@ func initDB(cfg *config.Config) error {
 		&model.BizObject{}, &model.BizField{}, &model.FormSchema{}, &model.GenAudit{},
 		&model.DevProject{}, &model.DevRun{}, &model.DevRunEvent{}, &model.DevRelease{}, &model.DevDeployment{},
 	}, model.RegistryTables()...)
+	if cfg.App.Mode != "release" {
+		models = append(models, &model.AiBot{}, &model.AiBotConversation{}, &model.AiBotDelivery{}, &model.AiBotSendAttempt{})
+	}
 	if err := db.AutoMigrate(models...); err != nil {
 		return err
 	}
 	if err := migrateFormgenProjectNamespace(db); err != nil {
 		return err
+	}
+	if cfg.App.Mode != "release" {
+		// Both database drivers support these indexes. Legacy HTTP records
+		// without a connection ID are excluded.
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_wecom_bot_id ON sys_ai_bots (bot_id) WHERE platform = 'wecom' AND bot_id <> ''").Error; err != nil {
+			return err
+		}
+		if err := db.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_bot_dingtalk_client_id ON sys_ai_bots (client_id) WHERE platform = 'dingtalk' AND client_id <> ''").Error; err != nil {
+			return err
+		}
 	}
 	global.DB = db
 	return nil
