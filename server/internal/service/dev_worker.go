@@ -105,7 +105,7 @@ func RecoverInterruptedDevelopmentRuns() error {
 				return err
 			}
 		}
-		return nil
+		return recoverDevelopmentBaselineReservations(tx)
 	})
 }
 
@@ -150,6 +150,16 @@ func claimNextDevelopmentRun() (*model.DevRun, error) {
 		var project model.DevProject
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&project, run.ProjectID).Error; err != nil {
 			return err
+		}
+		if project.PromotionRunKey != "" {
+			return nil
+		}
+		if project.CurrentCommit != "" && (run.BaseCommit != project.CurrentCommit || run.BaseProjectRevision != project.BaselineRevision) {
+			result := tx.Model(&model.DevRun{}).Where("id = ? AND state = ?", run.ID, "queued").Updates(map[string]any{"state": "failed", "error": "任务基于旧项目基线，请重新提交需求", "finished_at": time.Now().UTC()})
+			if result.Error != nil {
+				return result.Error
+			}
+			return tx.Create(&model.DevRunEvent{RunID: run.ID, Kind: "stale_baseline", Message: "项目基线已变化，未执行旧任务"}).Error
 		}
 		var busy int64
 		if err := tx.Model(&model.DevRun{}).Where("project_id = ? AND state = ?", run.ProjectID, "running").Count(&busy).Error; err != nil {
@@ -247,6 +257,9 @@ func executeDevelopmentRun(parent context.Context, run model.DevRun, services de
 	project, err := EngineeringProject(scope)
 	if err != nil {
 		return err
+	}
+	if project.PromotionRunKey != "" || (project.CurrentCommit != "" && (run.BaseCommit != project.CurrentCommit || run.BaseProjectRevision != project.BaselineRevision)) {
+		return errors.New("项目基线已变化或正在提升，未执行旧任务")
 	}
 	if err := ctx.Err(); err != nil {
 		return err

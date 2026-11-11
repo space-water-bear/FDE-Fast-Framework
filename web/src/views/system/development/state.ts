@@ -1,4 +1,4 @@
-import type { DevCheckReport, DevRelease, DevRun, DevRunEvent } from '@/api/development'
+import type { DevCheckReport, DevProject, DevRelease, DevRun, DevRunEvent, DevTargetStatus } from '@/api/development'
 
 const RUN_LABELS: Record<string, string> = {
   queued: '排队中', running: '执行中', succeeded: '检查通过', failed: '执行失败',
@@ -88,4 +88,32 @@ export function validateRun(requirement: string, agentId?: number): string {
   if (!requirement.trim()) return '请填写业务需求与验收条件'
   if (new TextEncoder().encode(requirement.trim()).length > 32000) return '需求内容过长，请精简后提交'
   return ''
+}
+
+
+export function canPromoteRun(run: DevRun, checks: DevCheckReport | null, project?: DevProject): boolean {
+  return canBuildRelease(run, checks) && !run.promotedCommit && !!project?.currentCommit
+    && project.currentCommit === run.baseCommit
+    && Number.isInteger(project.baselineRevision) && project.baselineRevision >= 0 && project.baselineRevision === run.baseProjectRevision
+}
+
+export function canUpgradeTarget(release?: Pick<DevRelease, 'id' | 'status' | 'artifactHash'> | null, target?: DevTargetStatus | null): boolean {
+  if (!release?.id || release.status !== 'ready' || !release.artifactHash || !target?.currentReleaseId || target.operationActive !== false) return false
+  if (target.status === 'deployed') return target.currentReleaseId !== release.id
+  return ['upgrading', 'upgrade_failed'].includes(target.status) && target.currentReleaseId === release.id && !!target.previousReleaseId
+}
+
+export function canRollbackTarget(target?: DevTargetStatus | null): boolean {
+  return !!target && target.operationActive === false && ['deployed', 'upgrade_failed', 'rolling_back', 'rollback_failed'].includes(target.status)
+    && !!target.currentReleaseId && !!target.previousReleaseId && target.backupAvailable
+}
+
+export function targetStatusLabel(status: string, operationActive?: boolean): string {
+  if (operationActive === false && status === 'upgrading') return '升级中断，等待继续'
+  if (operationActive === false && status === 'rolling_back') return '回退中断，等待恢复'
+  const labels: Record<string, string> = {
+    empty: '尚未部署', deployed: '运行中', upgrading: '升级中',
+    upgrade_failed: '升级失败，等待恢复', rolling_back: '回退中', rollback_failed: '回退失败，等待恢复',
+  }
+  return labels[status] ?? '状态待确认'
 }

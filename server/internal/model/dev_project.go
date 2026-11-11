@@ -7,11 +7,16 @@ const DefaultProjectID uint = 1
 // DevProject keeps development metadata and source roots separate per customer.
 type DevProject struct {
 	Base
-	Key           string `json:"key" gorm:"size:48;uniqueIndex"`
-	Name          string `json:"name" gorm:"size:128"`
-	OwnerID       uint   `json:"ownerId" gorm:"index"`
-	SourceCommit  string `json:"sourceCommit" gorm:"size:64"`
-	WorkspacePath string `json:"-" gorm:"size:1024"`
+	Key               string `json:"key" gorm:"size:48;uniqueIndex"`
+	Name              string `json:"name" gorm:"size:128"`
+	OwnerID           uint   `json:"ownerId" gorm:"index"`
+	SourceCommit      string `json:"sourceCommit" gorm:"size:64"`
+	WorkspacePath     string `json:"-" gorm:"size:1024"`
+	CurrentCommit     string `json:"currentCommit" gorm:"size:64"`
+	BaselineHash      string `json:"baselineHash" gorm:"size:64"`
+	BaselineRevision  uint   `json:"baselineRevision" gorm:"not null;default:0"`
+	LastPromotedRunID uint   `json:"lastPromotedRunId"`
+	PromotionRunKey   string `json:"-" gorm:"size:64;not null;default:''"`
 }
 
 func (DevProject) TableName() string { return "sys_dev_projects" }
@@ -35,6 +40,9 @@ type DevRun struct {
 	FinishedAt          *time.Time `json:"finishedAt,omitempty"`
 	Requirement         string     `json:"requirement" gorm:"type:text"`
 	BaseCommit          string     `json:"baseCommit" gorm:"size:64"`
+	BaseProjectRevision uint       `json:"baseProjectRevision" gorm:"not null;default:0"`
+	PromotedCommit      string     `json:"promotedCommit,omitempty" gorm:"size:64"`
+	PromotedAt          *time.Time `json:"promotedAt,omitempty"`
 	State               string     `json:"state" gorm:"size:32;index"`
 	Phase               string     `json:"phase" gorm:"size:32"`
 	Error               string     `json:"error,omitempty" gorm:"type:text"`

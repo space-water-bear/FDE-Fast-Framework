@@ -13,6 +13,27 @@ import (
 	"fde-admin/internal/model"
 )
 
+func TestDevelopmentToolSchemasEncodeRequiredAsArrays(t *testing.T) {
+	for _, tool := range DevelopmentAgentTools(model.DevRun{}) {
+		definition := tool.(*developmentTool)
+		raw, err := json.Marshal(definition.Schema())
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(raw, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		required, ok := decoded["required"].([]any)
+		if !ok {
+			t.Fatalf("%s required must encode as an array: %s", tool.Name(), raw)
+		}
+		if (tool.Name() == "read_project_context" || tool.Name() == "run_checks") && len(required) != 0 {
+			t.Fatalf("%s should have an empty required array", tool.Name())
+		}
+	}
+}
+
 func TestDevelopmentToolsGenerateRuntimeAssetsWithoutTouchingBaseline(t *testing.T) {
 	scope, _, repo := setupDevelopmentRunTest(t)
 	run := model.DevRun{ProjectID: scope.ProjectID, ActorID: scope.ActorID, WorkspacePath: repo}

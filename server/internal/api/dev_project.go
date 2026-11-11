@@ -110,3 +110,28 @@ func ListDevRuns(c *gin.Context) {
 	}
 	utils.OK(c, gin.H{"list": runs, "total": total})
 }
+
+// PromoteDevRun accepts only a user's explicit confirmation of a verified run.
+func PromoteDevRun(c *gin.Context) {
+	scope, ok := engineeringRequestScope(c)
+	if !ok {
+		return
+	}
+	var in struct {
+		Approve bool `json:"approve"`
+	}
+	if c.ShouldBindJSON(&in) != nil {
+		utils.Fail(c, "参数错误")
+		return
+	}
+	if !in.Approve {
+		utils.Fail(c, "请明确确认将已验证候选提升为项目基线")
+		return
+	}
+	project, err := service.PromoteDevRun(c.Request.Context(), scope, c.Param("key"), in.Approve)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	utils.OK(c, project)
+}

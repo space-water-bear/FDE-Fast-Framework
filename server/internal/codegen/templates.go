@@ -206,7 +206,14 @@ const vueTpl = `<template>
     <div v-loading="loading">
       <vxe-table :data="list" height="auto" align="center" :row-config="{ isHover: true }">
         <vxe-column type="seq" title="#" width="60" />
-[[range .ListFields]][[if eq .FormControl "switch"]]        <vxe-column title="[[.Title]]" width="100">
+[[if .SchemaDriven]]        <vxe-column v-for="column in businessColumns" :key="column.name" :field="column.name" :title="column.title" min-width="120">
+          <template #default="{ row }">
+            <span v-if="column.format === 'date-time'">{{ formatTime(row[column.name]) }}</span>
+            <el-tag v-else-if="column.kind === 'boolean'" :type="row[column.name] ? 'success' : 'info'" size="small">{{ row[column.name] ? '启用' : '禁用' }}</el-tag>
+            <span v-else>{{ row[column.name] }}</span>
+          </template>
+        </vxe-column>
+[[else]][[range .ListFields]][[if eq .FormControl "switch"]]        <vxe-column title="[[.Title]]" width="100">
           <template #default="{ row }">
             <el-tag :type="row.[[.JSONName]] ? 'success' : 'info'" size="small">{{ row.[[.JSONName]] ? '启用' : '禁用' }}</el-tag>
           </template>
@@ -215,7 +222,7 @@ const vueTpl = `<template>
           <template #default="{ row }">{{ formatTime(row.[[.JSONName]]) }}</template>
         </vxe-column>
 [[else]]        <vxe-column field="[[.JSONName]]" title="[[.Title]]" min-width="120" />
-[[end]][[end]]        <vxe-column title="创建时间" width="170">
+[[end]][[end]][[end]]        <vxe-column title="创建时间" width="170">
           <template #default="{ row }">{{ formatTime(row.createdAt) }}</template>
         </vxe-column>
         <vxe-column title="操作" width="160" fixed="right">
@@ -268,7 +275,7 @@ const vueTpl = `<template>
 </template>
 
 <script setup lang="ts">
-import { onMounted, reactive, ref } from 'vue'
+import { [[if .SchemaDriven]]computed, [[end]]onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 [[if .SchemaDriven]]import FormRender from '@/components/form-render/FormRender.vue'
 import type { FormSchema } from '@/components/form-render/types'
@@ -294,6 +301,10 @@ const editingId = ref<number | null>(null)
 const saving = ref(false)
 [[if .SchemaDriven]]const formRef = ref<InstanceType<typeof FormRender>>()
 const businessSchema = ref<FormSchema>()
+const businessColumns = computed(() => Object.entries(businessSchema.value?.fields ?? {})
+  .filter(([, field]) => field['x-fde']?.inList === true)
+  .sort(([, left], [, right]) => (left['x-fde']?.sort ?? 0) - (right['x-fde']?.sort ?? 0))
+  .map(([name, field]) => ({ name, title: field.title ?? name, kind: field.type, format: field.format })))
 [[else]]const formRef = ref<FormInstance>()
 [[end]]
 
@@ -343,8 +354,14 @@ function handleReset() {
 
 function openDialog(row?: [[.StructName]]Item) {
   editingId.value = row ? row.id : null
-[[range .FormFields]]  form.[[.JSONName]] = row ? (row.[[.JSONName]] ?? [[.TsDefault]]) : [[.TsDefault]]
-[[end]]  dialogVisible.value = true
+[[if .SchemaDriven]]  for (const key of Object.keys(form)) delete form[key]
+  const values: Record<string, any> = row ? { ...row } : {}
+  for (const [name, field] of Object.entries(businessSchema.value?.fields ?? {})) {
+    const fallback = field.type === 'boolean' ? false : (field.type === 'number' || field.type === 'integer' ? null : '')
+    form[name] = values[name] ?? field.default ?? fallback
+  }
+[[else]][[range .FormFields]]  form.[[.JSONName]] = row ? (row.[[.JSONName]] ?? [[.TsDefault]]) : [[.TsDefault]]
+[[end]][[end]]  dialogVisible.value = true
 }
 
 async function handleSave() {

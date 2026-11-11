@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -101,6 +102,11 @@ func BootstrapRuntime(cfg *config.Config, configPath, assetsPath, manifestPath s
 		return err
 	}
 	cfg.DB.DSN = databasePath
+	maintenanceUnlock, err := lockRuntimeBootstrap(databasePath + ".maintenance")
+	if err != nil {
+		return err
+	}
+	defer maintenanceUnlock()
 	cfg.App.Mode = "release"
 	cfg.Runtime.ManifestPath, cfg.Runtime.ReleaseID, cfg.Runtime.SourceHash = manifestPath, pkg.ID, pkg.Manifest.SourceHash
 	journalPath := configPath + ".bootstrap.json"
@@ -169,14 +175,18 @@ func BootstrapRuntime(cfg *config.Config, configPath, assetsPath, manifestPath s
 			}
 		}
 		for _, asset := range assets.Objects {
-			object := model.BizObject{ProjectID: model.DefaultProjectID, Key: asset.ObjectKey, Name: asset.Name, Table: asset.TableName, Version: 1, ActiveVersion: 1}
+			version, err := runtimeSchemaVersion(asset.Schema)
+			if err != nil {
+				return err
+			}
+			object := model.BizObject{ProjectID: model.DefaultProjectID, Key: asset.ObjectKey, Name: asset.Name, Table: asset.TableName, Version: version, ActiveVersion: version}
 			schema, _ := json.Marshal(asset.Schema)
 			object.Schema = string(schema)
 			if err := tx.Where("project_id = ? AND key = ?", model.DefaultProjectID, asset.ObjectKey).FirstOrCreate(&object).Error; err != nil {
 				return err
 			}
-			form := model.FormSchema{ObjectID: object.ID, Version: 1, Schema: string(schema), Published: true, CreatedBy: admin.ID, ActivatedBy: admin.ID}
-			if err := tx.Where("object_id = ? AND version = ?", object.ID, 1).FirstOrCreate(&form).Error; err != nil {
+			form := model.FormSchema{ObjectID: object.ID, Version: version, Schema: string(schema), Published: true, CreatedBy: admin.ID, ActivatedBy: admin.ID}
+			if err := tx.Where("object_id = ? AND version = ?", object.ID, version).FirstOrCreate(&form).Error; err != nil {
 				return err
 			}
 			menu := model.Menu{Path: asset.Menu.Path, Name: asset.Menu.Name, Title: asset.Menu.Title, Component: asset.Menu.Component, Type: 1, Icon: "Document"}
@@ -226,6 +236,9 @@ func validateRuntimeBusinessAssets(assets service.BusinessInstallationAssets) er
 	}
 	keys, tables, paths, names := map[string]bool{}, map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, asset := range assets.Objects {
+		if _, err := runtimeSchemaVersion(asset.Schema); err != nil {
+			return err
+		}
 		if !runtimeBusinessKey.MatchString(asset.ObjectKey) || !runtimeBusinessKey.MatchString(asset.TableName) || !runtimeBusinessPath.MatchString(asset.Menu.Path) || runtimeReservedPaths[asset.Menu.Path] {
 			return errors.New("业务资产必须使用独立biz_命名空间及安全业务路由")
 		}
@@ -257,6 +270,33 @@ func validateRuntimeBusinessAssets(assets service.BusinessInstallationAssets) er
 		}
 	}
 	return nil
+}
+
+// Legacy assets omitted version and were installed as version 1.
+func runtimeSchemaVersion(schema map[string]any) (int, error) {
+	value, exists := schema["version"]
+	if !exists {
+		return 1, nil
+	}
+	var version float64
+	switch typed := value.(type) {
+	case float64:
+		version = typed
+	case int:
+		version = float64(typed)
+	case json.Number:
+		parsed, err := typed.Int64()
+		if err != nil {
+			return 0, errors.New("业务Schema版本必须为正整数")
+		}
+		version = float64(parsed)
+	default:
+		return 0, errors.New("业务Schema版本必须为正整数")
+	}
+	if math.IsNaN(version) || version < 1 || version > math.MaxInt32 || math.Trunc(version) != version {
+		return 0, errors.New("业务Schema版本必须为有效正整数")
+	}
+	return int(version), nil
 }
 func canonicalRuntimeJSON(raw []byte) ([]byte, error) {
 	var value any

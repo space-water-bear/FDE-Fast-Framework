@@ -14,10 +14,11 @@
     <el-empty v-if="!projects.length && !initializing" description="先创建客户项目，生成独立源码工作区" />
 
     <template v-if="selectedProject">
-      <p class="project-meta">{{ selectedProject.name }} · 源码基线 {{ selectedProject.sourceCommit ? selectedProject.sourceCommit.slice(0, 12) : '尚未配置，请新建独立客户项目' }}</p>
+      <p class="project-meta">{{ selectedProject.name }} · 当前基线 {{ selectedProject.currentCommit ? selectedProject.currentCommit.slice(0, 12) : '尚未配置' }} · 第 {{ selectedProject.baselineRevision || 0 }} 版</p>
+      <p class="muted">新任务从当前项目基线开始。模板来源 {{ selectedProject.sourceCommit ? selectedProject.sourceCommit.slice(0, 12) : '尚未配置' }}。</p>
       <section class="work-card compose-card">
         <div class="section-heading"><h3>描述业务需求</h3><span>关闭页面后任务继续执行，重新打开可恢复查看。</span></div>
-        <el-input v-model="requirement" type="textarea" :rows="4" :disabled="creatingRun" placeholder="说明业务对象、字段、规则和验收条件，例如：建立维修登记，登记号必填且唯一，支持查询和编辑……" />
+        <el-input ref="requirementInput" v-model="requirement" type="textarea" :rows="4" :disabled="creatingRun" placeholder="说明业务对象、字段、规则和验收条件，例如：建立维修登记，登记号必填且唯一，支持查询和编辑……" />
         <div class="compose-actions">
           <el-select v-model="agentId" :disabled="creatingRun" placeholder="选择执行智能体" class="agent-select">
             <el-option v-for="agent in enabledAgents" :key="agent.id" :value="agent.id" :label="agent.name" />
@@ -47,13 +48,21 @@
               <el-button v-if="canCancelRun(detail.run) || detail.run.cancelRequested" type="danger" plain size="small" :disabled="detail.run.cancelRequested || !!action" :loading="canceling" @click="cancelRun">{{ detail.run.cancelRequested ? '等待取消完成' : '取消任务' }}</el-button>
             </div>
             <div class="run-meta">{{ detail.run.key }} · {{ displayTime(detail.run.createdAt) }} · 执行 {{ detail.run.attempts || 0 }} 轮</div>
+            <p class="run-meta">开发基线 {{ detail.run.baseCommit.slice(0, 12) }} · 第 {{ detail.run.baseProjectRevision || 0 }} 版</p>
             <p class="requirement-text">{{ detail.run.requirement }}</p>
             <el-steps :active="activePhase" :process-status="detail.run.state === 'failed' ? 'error' : detail.run.state === 'queued' ? 'wait' : 'process'" finish-status="success" simple>
               <el-step v-for="phase in phases" :key="phase" :title="phaseLabel(phase)" />
             </el-steps>
-            <el-alert v-if="detail.run.state === 'succeeded'" title="源码检查已通过，可审查差异并构建发布包；尚未部署交付。" type="success" :closable="false" class="detail-notice" />
+            <el-alert v-if="detail.run.state === 'succeeded'" title="源码检查已通过，可审查差异并构建发布包。" type="success" :closable="false" class="detail-notice" />
             <el-alert v-if="detail.run.error" :title="detail.run.error" type="error" :closable="false" class="detail-notice" />
             <el-alert v-if="detail.run.cancelRequested && isRunPending(detail.run)" title="取消请求已保存，正在等待后台停止。" type="warning" :closable="false" class="detail-notice" />
+
+            <div v-if="detail.run.state === 'succeeded'" class="baseline-actions">
+              <el-button v-if="!detail.run.promotedCommit" type="primary" plain size="small" :disabled="!promotionAllowed || !!action" :loading="action === 'promote'" @click="promoteRun">提升为项目基线</el-button>
+              <span v-else class="muted">已提升为基线 {{ detail.run.promotedCommit.slice(0, 12) }}</span>
+              <el-button v-if="detail.run.promotedCommit" size="small" :disabled="!!action || creatingRun" @click="continueDevelopment">继续开发</el-button>
+              <span v-if="!detail.run.promotedCommit && !promotionAllowed" class="muted">候选需通过检查并与当前项目基线一致。请刷新后核对。</span>
+            </div>
 
             <el-tabs v-model="detailTab" class="detail-tabs">
               <el-tab-pane label="执行记录" name="events">
@@ -77,6 +86,20 @@
               <div class="section-heading"><h3>发布与验收</h3><el-button type="primary" plain size="small" :disabled="!buildAllowed || !!action" :loading="action === 'build'" @click="buildRelease">{{ detail.release ? '重新核验发布包' : '构建发布包' }}</el-button></div>
               <p v-if="!buildAllowed" class="muted">任务通过检查且报告对应当前源码版本后，才能构建发布包。</p>
               <el-alert v-if="actionError" :title="actionError" type="error" :closable="false" />
+              <section class="target-panel">
+                <div class="release-actions">
+                  <el-select v-model="targetId" placeholder="选择测试部署目标" size="small" :disabled="!!action" class="target-select" @change="changeTarget"><el-option v-for="target in targets" :key="target.id" :value="target.id" :label="target.name" /></el-select>
+                  <el-button size="small" :disabled="!targetId || !!action" :loading="targetStatusLoading" @click="reloadTarget">刷新目标状态</el-button>
+                </div>
+                <p v-if="!targets.length" class="muted">当前项目没有可用部署目标。</p>
+                <el-alert v-if="targetStatusError" :title="targetStatusError" type="error" :closable="false" />
+                <template v-if="targetStatus">
+                  <dl class="release-meta"><dt>目标状态</dt><dd>{{ targetStatusLabel(targetStatus.status, targetStatus.operationActive) }}</dd><dt>当前版本</dt><dd>{{ targetStatus.currentReleaseId || '尚未部署' }}</dd><dt>上一个版本</dt><dd>{{ targetStatus.previousReleaseId || '无' }}</dd></dl>
+                  <a v-if="currentTargetUrl" :href="currentTargetUrl" target="_blank" rel="noopener noreferrer">打开当前应用</a>
+                  <el-button v-if="rollbackAllowed" type="warning" plain size="small" :disabled="!!action" :loading="action === 'rollback'" @click="rollbackRelease">{{ targetStatus.status === 'deployed' ? '回退到上一版本' : '恢复上一版本' }}</el-button>
+                  <p v-if="targetStatus.status === 'upgrade_failed' || targetStatus.status === 'rollback_failed'" class="muted">目标等待恢复，请核对当前版本与升级前快照。</p>
+                </template>
+              </section>
               <template v-if="detail.release">
                 <dl class="release-meta"><dt>发布版本</dt><dd>{{ detail.release.id }}</dd><dt>状态</dt><dd>{{ detail.release.status }}</dd><dt>源码摘要</dt><dd>{{ detail.release.sourceHash }}</dd><dt>制品摘要</dt><dd>{{ detail.release.artifactHash || '尚未生成' }}</dd></dl>
                 <el-alert v-if="!verifiedRelease" title="发布包尚未验证或与本任务源码版本不一致，不能预览或部署。" type="warning" :closable="false" />
@@ -89,10 +112,11 @@
                 <CredentialsPanel v-if="previewCredentials" title="预览应用" :credentials="previewCredentials" />
                 <p v-else-if="previewUrl" class="muted">本次未返回新登录信息，请使用此前保存的账号。</p>
                 <div class="release-actions">
-                  <el-select v-model="targetId" placeholder="选择测试部署目标" size="small" :disabled="!!action" class="target-select"><el-option v-for="target in targets" :key="target.id" :value="target.id" :label="target.name + ' · ' + target.kind" /></el-select>
-                  <el-button type="warning" size="small" :disabled="!verifiedRelease || !targetId || !!action" :loading="action === 'deploy'" @click="deployRelease">部署此发布版本</el-button>
+                  <el-button v-if="!targetStatus?.currentReleaseId" type="warning" size="small" :disabled="!verifiedRelease || !firstDeploymentAllowed || !!action" :loading="action === 'deploy'" @click="deployRelease">首次部署此版本</el-button>
+                  <el-button v-else-if="upgradeAllowed" type="warning" size="small" :disabled="!!action" :loading="action === 'upgrade'" @click="upgradeRelease">{{ ['upgrading', 'upgrade_failed'].includes(targetStatus.status) ? '继续此版本升级' : '升级到此版本' }}</el-button>
+                  <span v-else-if="targetStatus.status === 'deployed' && targetStatus.currentReleaseId === detail.release.id" class="muted">目标当前已运行此发布版本。</span>
+                  <span v-else class="muted">请先完成目标当前操作或恢复上一版本。</span>
                 </div>
-                <p v-if="!targets.length" class="muted">当前项目没有可用部署目标。</p>
                 <el-alert v-if="deployment" :type="deployment.status === 'deployed' ? 'success' : 'info'" :closable="false" :title="'部署状态：' + deployment.status + '；版本 ' + deployment.releaseId + '；目标 ' + deployment.targetId" />
                 <a v-if="deploymentUrl" :href="deploymentUrl" target="_blank" rel="noopener noreferrer">打开已部署应用</a>
                 <CredentialsPanel v-if="deploymentCredentials" title="已部署应用" :credentials="deploymentCredentials" />
@@ -122,9 +146,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { MagicStick, Plus, Refresh } from '@element-plus/icons-vue'
 import { listAiAgents } from '@/api/ai'
 import type { AiAgentItem } from '@/api/ai'
-import { buildDevRelease, cancelDevRun, createDevProject, createDevRun, deployDevRelease, downloadDevRelease, getDevRun, listDevProjects, listDevRuns, listDevTargets, previewDevRelease } from '@/api/development'
-import type { DevCredentials, DevDeployment, DevProject, DevRun, DevRunDetail, DevRunEvent, DevTarget } from '@/api/development'
-import { canBuildRelease, canCancelRun, canUseRelease, isDeployedResult, isRunPending, mergeRunEvents, phaseLabel, prettyReport, readCheckReport, readSavedSelection, runLabel, safeHttpUrl, validateProject, validateRun } from './state'
+import { buildDevRelease, cancelDevRun, getDevTarget, promoteDevRun, rollbackDevRelease, upgradeDevRelease, createDevProject, createDevRun, deployDevRelease, downloadDevRelease, getDevRun, listDevProjects, listDevRuns, listDevTargets, previewDevRelease } from '@/api/development'
+import type { DevCredentials, DevDeployment, DevProject, DevRun, DevRunDetail, DevRunEvent, DevTarget, DevTargetStatus } from '@/api/development'
+import { canPromoteRun, canUpgradeTarget, canRollbackTarget, targetStatusLabel, canBuildRelease, canCancelRun, canUseRelease, isDeployedResult, isRunPending, mergeRunEvents, phaseLabel, prettyReport, readCheckReport, readSavedSelection, runLabel, safeHttpUrl, validateProject, validateRun } from './state'
 import CredentialsPanel from './CredentialsPanel.vue'
 
 const SELECTION_KEY = 'fde-development-selection'
@@ -136,6 +160,7 @@ const selectedProject = computed(() => projects.value.find((project) => project.
 const enabledAgents = computed(() => agents.value.filter((agent) => agent.enabled))
 const agentId = ref<number>()
 const requirement = ref('')
+const requirementInput = ref<{ focus: () => void }>()
 const runs = ref<DevRun[]>([])
 const selectedKey = ref('')
 const detail = ref<DevRunDetail | null>(null)
@@ -158,6 +183,13 @@ const projectForm = reactive({ key: '', name: '' })
 const manifestVisible = ref(false)
 const targets = ref<DevTarget[]>([])
 const targetId = ref('')
+const targetStatus = ref<DevTargetStatus | null>(null)
+const targetStatusLoading = ref(false)
+const targetStatusError = ref('')
+const currentTargetUrl = computed(() => safeHttpUrl(targetStatus.value?.url))
+const targetStateReady = computed(() => !!targetStatus.value && !targetStatusLoading.value && !targetStatusError.value)
+const firstDeploymentAllowed = computed(() => targetStateReady.value && targetStatus.value?.status === 'empty' && targetStatus.value.operationActive === false)
+const rollbackAllowed = computed(() => targetStateReady.value && canRollbackTarget(targetStatus.value))
 const previewUrl = ref('')
 const previewCredentials = ref<DevCredentials | null>(null)
 const deploymentCredentials = ref<DevCredentials | null>(null)
@@ -166,12 +198,15 @@ const deploymentUrl = computed(() => safeHttpUrl(deployment.value?.url))
 const checks = computed(() => readCheckReport(detail.value?.checks))
 const buildAllowed = computed(() => !!detail.value && canBuildRelease(detail.value.run, checks.value))
 const verifiedRelease = computed(() => !!detail.value && canUseRelease(detail.value.run, checks.value, detail.value.release))
+const promotionAllowed = computed(() => !!detail.value && canPromoteRun(detail.value.run, checks.value, selectedProject.value))
+const upgradeAllowed = computed(() => verifiedRelease.value && targetStateReady.value && canUpgradeTarget(detail.value?.release, targetStatus.value))
 const checkReport = computed(() => prettyReport(detail.value?.checks))
 const resultReport = computed(() => prettyReport(detail.value?.result))
 const activePhase = computed(() => detail.value?.run.state === 'succeeded' ? 4 : Math.max(0, phases.indexOf(detail.value?.run.phase ?? 'plan')))
 let selectionRevision = 0
 let detailRequest = 0
 let listRequest = 0
+let targetRequest = 0
 let timer: ReturnType<typeof setTimeout> | undefined
 let active = true
 let disposed = false
@@ -239,6 +274,44 @@ async function loadDetail(showLoading = false): Promise<void> {
   } finally { if (requestId === detailRequest) detailLoading.value = false }
 }
 
+async function loadTargetStatus(): Promise<void> {
+  const selectedProjectId = projectId.value
+  const selectedTargetId = targetId.value
+  const requestId = ++targetRequest
+  if (!selectedProjectId || !selectedTargetId) {
+    targetStatus.value = null
+    targetStatusError.value = ''
+    return
+  }
+  targetStatusLoading.value = true
+  targetStatusError.value = ''
+  try {
+    const status = await getDevTarget(selectedProjectId, selectedTargetId)
+    if (disposed || projectId.value !== selectedProjectId || targetId.value !== selectedTargetId || requestId !== targetRequest) return
+    if (status.targetId !== selectedTargetId) throw new Error('目标状态与当前选择不一致，请重新读取')
+    targetStatus.value = status
+  } catch (error) {
+    if (projectId.value === selectedProjectId && targetId.value === selectedTargetId && requestId === targetRequest) {
+      targetStatusError.value = (error as Error).message || '目标状态读取失败'
+    }
+    throw error
+  } finally {
+    if (requestId === targetRequest) targetStatusLoading.value = false
+  }
+}
+
+async function reloadTarget(): Promise<void> {
+  try { await loadTargetStatus() } catch { /* 保留目标的最后状态，由页面显示读取错误。 */ }
+}
+
+async function changeTarget(): Promise<void> {
+  targetStatus.value = null
+  targetStatusError.value = ''
+  deployment.value = null
+  deploymentCredentials.value = null
+  await reloadTarget()
+}
+
 async function selectRun(run: DevRun): Promise<void> {
   if (action.value || selectedKey.value === run.key) return
   selectedKey.value = run.key
@@ -264,6 +337,10 @@ async function changeProject(id: number, restoreKey = ''): Promise<void> {
   total.value = 0
   targets.value = []
   targetId.value = ''
+  targetRequest++
+  targetStatus.value = null
+  targetStatusLoading.value = false
+  targetStatusError.value = ''
   resetDetail()
   pollingPaused.value = false
   persistSelection()
@@ -298,7 +375,10 @@ async function refreshCurrent(automatic = false): Promise<void> {
       }
     }
     if (!projectId.value || disposed || revision !== selectionRevision) return
-    const results = await Promise.allSettled([loadRunList(), loadDetail()])
+    const results = await Promise.allSettled([loadRunList(), loadDetail(), loadTargetStatus(), automatic ? listDevProjects() : Promise.resolve(null)] as const)
+    if (disposed || revision !== selectionRevision) return
+    const projectResult = results[3]
+    if (projectResult.status === 'fulfilled' && projectResult.value) projects.value = projectResult.value.list ?? []
     for (const result of results) if (result.status === 'rejected') pausePolling(result.reason)
   } finally { refreshing.value = false; schedulePoll() }
 }
@@ -345,6 +425,34 @@ async function cancelRun(): Promise<void> {
   } catch { /* 保留实际后台状态。 */ } finally { canceling.value = false }
 }
 
+function continueDevelopment(): void {
+  requirementInput.value?.focus()
+}
+
+async function promoteRun(): Promise<void> {
+  if (!detail.value || !projectId.value || !promotionAllowed.value || action.value) return
+  const selectedProjectId = projectId.value
+  const key = detail.value.run.key
+  const baseline = selectedProject.value!.currentCommit
+  const revision = selectedProject.value!.baselineRevision
+  try {
+    await ElMessageBox.confirm(`将任务 ${key} 的已验证源码提升为项目基线。当前基线 ${baseline.slice(0, 12)}，第 ${revision} 版。后续任务将从新基线开始，确认提升？`, '提升项目基线', { type: 'warning' })
+  } catch { return }
+  if (projectId.value !== selectedProjectId || detail.value?.run.key !== key || !promotionAllowed.value || selectedProject.value?.baselineRevision !== revision || action.value) return
+  action.value = 'promote'
+  actionError.value = ''
+  selectionRevision++
+  detailRequest++
+  try {
+    const project = await promoteDevRun(selectedProjectId, key)
+    projects.value = projects.value.map((item) => item.id === project.id ? project : item)
+    ElMessage.success('项目基线已提升，可继续创建开发任务')
+    const results = await Promise.allSettled([loadRunList(), loadDetail()])
+    for (const result of results) if (result.status === 'rejected') pausePolling(result.reason)
+  } catch (error) { actionError.value = (error as Error).message || '提升基线失败' }
+  finally { action.value = ''; schedulePoll() }
+}
+
 async function buildRelease(): Promise<void> {
   if (!detail.value || !projectId.value || !buildAllowed.value || action.value) return
   action.value = 'build'; actionError.value = ''; detailRequest++
@@ -381,7 +489,7 @@ async function previewRelease(): Promise<void> {
 }
 
 async function deployRelease(): Promise<void> {
-  if (!detail.value?.release || !projectId.value || !verifiedRelease.value || action.value || !targetId.value) return
+  if (!detail.value?.release || !projectId.value || !verifiedRelease.value || !firstDeploymentAllowed.value || action.value || !targetId.value) return
   const releaseId = detail.value.release.id
   const selectedTarget = targets.value.find((target) => target.id === targetId.value)
   if (!selectedTarget) return
@@ -389,7 +497,7 @@ async function deployRelease(): Promise<void> {
   try {
     await ElMessageBox.confirm(`将发布版本 ${releaseId} 安装到「${selectedTarget.name}」（${selectedTarget.id}）。此操作会初始化目标数据库并执行健康验收，确认部署？`, '部署固定版本', { type: 'warning' })
   } catch { return }
-  if (projectId.value !== selectedProjectId || detail.value?.release?.id !== releaseId || targetId.value !== selectedTarget.id || !verifiedRelease.value || action.value) return
+  if (projectId.value !== selectedProjectId || detail.value?.release?.id !== releaseId || targetId.value !== selectedTarget.id || !verifiedRelease.value || !firstDeploymentAllowed.value || action.value) return
   action.value = 'deploy'; actionError.value = ''; deployment.value = null; deploymentCredentials.value = null
   try {
     const { credentials, ...metadata } = await deployDevRelease(selectedProjectId, releaseId, selectedTarget.id)
@@ -397,7 +505,55 @@ async function deployRelease(): Promise<void> {
     deployment.value = metadata
     deploymentCredentials.value = credentials ?? null
   } catch (error) { actionError.value = (error as Error).message || '部署失败' }
-  finally { action.value = ''; schedulePoll() }
+  finally { action.value = ''; await reloadTarget(); schedulePoll() }
+}
+
+async function upgradeRelease(): Promise<void> {
+  if (!projectId.value || !detail.value?.release || !upgradeAllowed.value || action.value || !targetStatus.value) return
+  const selectedProjectId = projectId.value
+  const selectedTargetId = targetId.value
+  const releaseId = detail.value.release.id
+  const expected = targetStatus.value.currentReleaseId
+  const resuming = ['upgrading', 'upgrade_failed'].includes(targetStatus.value.status)
+  const confirmation = resuming
+    ? `继续目标 ${selectedTargetId} 尚未完成的版本 ${releaseId} 升级。系统将核对已有日志与快照，确认重试？`
+    : `将目标 ${selectedTargetId} 从版本 ${expected} 升级到 ${releaseId}。系统会保存升级前快照并验证业务状态，确认升级？`
+  try {
+    await ElMessageBox.confirm(confirmation, resuming ? '重试版本升级' : '升级固定版本', { type: 'warning' })
+  } catch { return }
+  if (projectId.value !== selectedProjectId || targetId.value !== selectedTargetId || detail.value?.release?.id !== releaseId || targetStatus.value?.currentReleaseId !== expected || !upgradeAllowed.value || action.value) return
+  action.value = 'upgrade'
+  actionError.value = ''
+  deploymentCredentials.value = null
+  try {
+    const result = await upgradeDevRelease(selectedProjectId, releaseId, selectedTargetId, expected)
+    if (!isDeployedResult(result, releaseId, selectedTargetId)) throw new Error('升级尚未完成，请查看目标状态')
+    deployment.value = { status: result.status, releaseId: result.releaseId, targetId: result.targetId, url: result.url }
+    ElMessage.success('目标版本已升级')
+  } catch (error) { actionError.value = (error as Error).message || '升级失败，请查看目标状态' }
+  finally { action.value = ''; await reloadTarget(); schedulePoll() }
+}
+
+async function rollbackRelease(): Promise<void> {
+  if (!projectId.value || !rollbackAllowed.value || action.value || !targetStatus.value) return
+  const selectedProjectId = projectId.value
+  const selectedTargetId = targetId.value
+  const current = targetStatus.value.currentReleaseId
+  const previous = targetStatus.value.previousReleaseId
+  try {
+    await ElMessageBox.confirm(`将目标 ${selectedTargetId} 从版本 ${current} 恢复到 ${previous}，并恢复升级前的数据快照。升级后若已有业务数据或上传文件变更，系统会拒绝快照恢复。确认回退？`, '恢复上一版本', { type: 'warning' })
+  } catch { return }
+  if (projectId.value !== selectedProjectId || targetId.value !== selectedTargetId || targetStatus.value?.currentReleaseId !== current || targetStatus.value?.previousReleaseId !== previous || !rollbackAllowed.value || action.value) return
+  action.value = 'rollback'
+  actionError.value = ''
+  deploymentCredentials.value = null
+  try {
+    const result = await rollbackDevRelease(selectedProjectId, current, selectedTargetId, current)
+    if (!isDeployedResult(result, previous, selectedTargetId)) throw new Error('恢复尚未完成，请查看目标状态')
+    deployment.value = { status: result.status, releaseId: result.releaseId, targetId: result.targetId, url: result.url }
+    ElMessage.success('上一版本已恢复')
+  } catch (error) { actionError.value = (error as Error).message || '恢复失败，请查看目标状态' }
+  finally { action.value = ''; await reloadTarget(); schedulePoll() }
 }
 
 onMounted(async () => {
@@ -416,12 +572,14 @@ onMounted(async () => {
 })
 onActivated(() => { active = true; if (ready) void refreshCurrent() })
 onDeactivated(() => { active = false; stopTimer(); clearCredentials() })
-onBeforeUnmount(() => { disposed = true; active = false; selectionRevision++; detailRequest++; listRequest++; stopTimer(); clearCredentials() })
+onBeforeUnmount(() => { disposed = true; active = false; selectionRevision++; detailRequest++; listRequest++; targetRequest++; stopTimer(); clearCredentials() })
 </script>
 
 <style scoped>
 .development-page { display: flex; flex-direction: column; gap: 12px; }
 .project-select { width: 300px; }
+.baseline-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0; }
+.target-panel { border: 1px solid var(--el-border-color-light); border-radius: 4px; padding: 12px; margin: 12px 0; }
 .project-meta, .muted, .run-meta { color: var(--el-text-color-secondary); font-size: 12px; margin: 0; }
 .work-card { padding: 16px; background: var(--el-bg-color); border: 1px solid var(--el-border-color-lighter); border-radius: 6px; min-width: 0; }
 .section-heading, .compose-actions, .release-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
