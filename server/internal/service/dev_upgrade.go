@@ -41,7 +41,18 @@ func developmentTargetDirectory(scope EngineeringScope, targetID string) (string
 	if root == "" {
 		root = "./data/test-targets"
 	}
-	return filepath.Abs(filepath.Join(root, fmt.Sprint(scope.ProjectID), targetID))
+	target, err := filepath.Abs(filepath.Join(root, fmt.Sprint(scope.ProjectID), targetID))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Lstat(target)
+	if os.IsNotExist(err) {
+		return target, nil
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return "", errors.New("交付目标必须为真实目录")
+	}
+	return filepath.EvalSymlinks(target)
 }
 
 func GetDevelopmentTarget(ctx context.Context, scope EngineeringScope, targetID string) (*DevelopmentTargetStatus, error) {
@@ -80,6 +91,7 @@ func GetDevelopmentTarget(ctx context.Context, scope EngineeringScope, targetID 
 	if query.Error != nil {
 		return nil, query.Error
 	}
+	state.TargetID = targetID
 	return state, nil
 }
 

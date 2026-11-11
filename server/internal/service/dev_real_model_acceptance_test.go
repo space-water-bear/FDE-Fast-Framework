@@ -143,13 +143,13 @@ func TestDevelopmentRealModelFirstDelivery(t *testing.T) {
 	injected := false
 	services.snapshot = func(ctx context.Context, current model.DevRun) (string, string, error) {
 		if !injected {
-			path := filepath.Join(current.WorkspacePath, "server/internal/service/repair_ticket.go")
-			code, err := os.ReadFile(path)
+			path := "server/internal/service/repair_ticket.go"
+			code, err := readRootedFile(current.WorkspacePath, path)
 			if err != nil {
 				return "", "", err
 			}
-			code = append(code, []byte("\nvar injectedRealModelCompileFailure UndefinedRealModelAcceptanceType\n")...)
-			if err := os.WriteFile(path, code, 0o644); err != nil {
+			injection := developmentChange{Path: path, ExpectedHash: sha256Hex(string(code)), Content: string(code) + "\nvar injectedRealModelCompileFailure UndefinedRealModelAcceptanceType\n"}
+			if _, err := applyDevelopmentChanges(current, []developmentChange{injection}); err != nil {
 				return "", "", err
 			}
 			injected = true

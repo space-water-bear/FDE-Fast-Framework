@@ -44,7 +44,7 @@ func TestDevelopmentTargetReadsExistingP1AndRejectsStaleApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err = GetDevelopmentTarget(ctx, scope, "local-linux")
-	if err != nil || state.CurrentReleaseID != pkg.ID || state.Status != "deployed" {
+	if err != nil || state.CurrentReleaseID != pkg.ID || state.Status != "deployed" || state.TargetID != "local-linux" {
 		t.Fatalf("P1 target: %+v %v", state, err)
 	}
 	original := developmentDockerCommand
@@ -61,6 +61,31 @@ func TestDevelopmentTargetReadsExistingP1AndRejectsStaleApproval(t *testing.T) {
 	}
 	if _, err := RollbackDevelopmentRelease(ctx, scope, pkg.ID, "local-linux", pkg.ID, true); err == nil {
 		t.Fatal("P1 target had no previous version")
+	}
+}
+
+func TestDevelopmentTargetAliasesUseTheInstalledContainerIdentity(t *testing.T) {
+	pkg, _, _, _ := releasePackageFixture(t)
+	scope := setupReleaseControl(t, pkg)
+	target, err := developmentTargetDirectory(scope, "local-linux")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonical, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(t.TempDir(), "targets-alias")
+	if err := os.Symlink(global.Config.Development.TargetDir, alias); err != nil {
+		t.Fatal(err)
+	}
+	global.Config.Development.TargetDir = alias
+	observed, err := developmentTargetDirectory(scope, "local-linux")
+	if err != nil || observed != canonical || developmentContainerName(observed) != developmentContainerName(canonical) {
+		t.Fatalf("aliased path changed the running container identity: %s %v", observed, err)
 	}
 }
 
