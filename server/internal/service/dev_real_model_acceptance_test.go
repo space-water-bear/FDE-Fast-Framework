@@ -132,7 +132,7 @@ func TestDevelopmentRealModelFirstDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	scope := EngineeringScope{ActorID: admin.ID, ProjectID: project.ID}
-	run, err := CreateDevRun(context.Background(), scope, "构建维修登记，包含登记号、问题描述、处理状态、负责人、登记时间，描述必填且不超过200字；发布后完成CRUD和权限验收。", agent.ID)
+	run, err := CreateDevRun(context.Background(), scope, "使用generate_business_code创建标准CRUD维修登记，tableName=biz_repair_ticket，structName=RepairTicket。字段为ticket_no(string，必填，maxLength=64，列表与查询)，description(text，必填，maxLength=200)，status(string，必填)，owner(string，可选)，reported_at(datetime，必填)。全部字段inForm=true、inList=true。生成后交给宿主检查，收到错误反馈时修复对应生成文件。", agent.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

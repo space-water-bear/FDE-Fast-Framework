@@ -84,12 +84,16 @@ func TestDevelopmentDockerIncrementalDelivery(t *testing.T) {
 		}
 		var lastTool map[string]any
 		update := false
+		repair := false
 		for _, m := range input.Messages {
 			if m["role"] == "tool" {
 				lastTool = m
 			}
 			if content, ok := m["content"].(string); ok && strings.Contains(content, "P2_PRIORITY") {
 				update = true
+			}
+			if content, ok := m["content"].(string); ok && strings.Contains(content, "宿主检查失败") {
+				repair = true
 			}
 		}
 		message := map[string]any{"role": "assistant", "content": "业务候选已生成，等待宿主检查。"}
@@ -99,7 +103,7 @@ func TestDevelopmentDockerIncrementalDelivery(t *testing.T) {
 			message = map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{map[string]any{"id": id, "type": "function", "function": map[string]any{"name": name, "arguments": string(raw)}}}}
 			finish = "tool_calls"
 		}
-		if lastTool == nil {
+		if lastTool == nil && !repair {
 			if update {
 				call("update-priority", "generate_business_code", map[string]any{"objectKey": "biz_repair_ticket", "mode": "update", "baseSpecVersion": 1, "fields": []map[string]any{{"name": "priority", "title": "优先级", "type": "enum", "required": true, "inForm": true, "inList": true, "rules": map[string]any{"enum": []string{"normal", "urgent"}, "default": "normal"}}}})
 			} else {
