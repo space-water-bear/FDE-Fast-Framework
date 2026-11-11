@@ -15,10 +15,12 @@ AI 框架迁移开发文档：docs/agent-framework-go.md（eino → Microsoft Ag
 企业微信和钉钉机器人使用长连接，接入步骤和验收范围见 [AI 机器人说明](docs/ai-bots.md)。
 平台协议核对见 [企业微信](docs/wecom-long-connection-audit.md) 和 [钉钉](docs/dingtalk-stream-audit.md)。文档权限配置见 [企业微信授权说明](docs/wecom-authorization.md)。
 分阶段改造计划：[内置智能体业务开发与交付路线图](docs/agent-delivery-roadmap.md)。
-当前改造说明：[P1 内置智能体首次开发与交付](docs/agent-delivery-p1.md)。
+当前改造说明见 [P2 增量开发与 SQLite 升级](docs/agent-delivery-p2.md)，首次安装准备见 [P1 内置智能体首次开发与交付](docs/agent-delivery-p1.md)。
 历史记录：[P0 开发契约与客户工作区](docs/agent-delivery-p0.md)。
 
 P1 入口为“系统管理 → 开发工作台”：创建客户项目、选择智能体、提交需求，后台在独立工作区生成新模块并运行固定检查，再由用户审阅、打包和显式预览/首次部署。使用前先执行 `go run ./cmd/fde prepare-image`；具体操作、Linux/SQLite 首次安装范围和验证记录见 P1 说明。
+
+后续开发可在审阅后提升项目基线，再对已接管业务追加字段或按哈希修改源码。工作台提供绑定目标当前版本的升级与回退确认，SQLite 升级在停写备份和副本预演后执行，恢复前检查新增业务写入与权限冲突。支持范围和操作入口见 P2 说明。
 
 下方保留原脚手架工作台及兼容生成器用法。工作台默认/显式 `workbench` 才初始化并启动 worker；交付应用使用 `bootstrap` 首次安装及带 manifest 的 `serve`，普通 `serve` 不执行 AutoMigrate。已有业务增量修改与不同版本升级仍属 P2。
 

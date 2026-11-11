@@ -53,7 +53,7 @@
             <el-steps :active="activePhase" :process-status="detail.run.state === 'failed' ? 'error' : detail.run.state === 'queued' ? 'wait' : 'process'" finish-status="success" simple>
               <el-step v-for="phase in phases" :key="phase" :title="phaseLabel(phase)" />
             </el-steps>
-            <el-alert v-if="detail.run.state === 'succeeded'" title="源码检查已通过，可审查差异并构建发布包；尚未部署交付。" type="success" :closable="false" class="detail-notice" />
+            <el-alert v-if="detail.run.state === 'succeeded'" title="源码检查已通过，可审查差异并构建发布包。" type="success" :closable="false" class="detail-notice" />
             <el-alert v-if="detail.run.error" :title="detail.run.error" type="error" :closable="false" class="detail-notice" />
             <el-alert v-if="detail.run.cancelRequested && isRunPending(detail.run)" title="取消请求已保存，正在等待后台停止。" type="warning" :closable="false" class="detail-notice" />
 
