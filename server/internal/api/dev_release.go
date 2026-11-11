@@ -54,6 +54,81 @@ func ListDevelopmentTargets(c *gin.Context) {
 	}
 	utils.OK(c, gin.H{"list": []gin.H{{"id": "local-linux", "name": "本机隔离 Linux 首次安装测试环境（" + global.Config.Development.TargetArch + "）", "kind": "docker-first-install"}}})
 }
+func GetDevelopmentTarget(c *gin.Context) {
+	scope, ok := engineeringRequestScope(c)
+	if !ok {
+		return
+	}
+	status, err := service.GetDevelopmentTarget(c.Request.Context(), scope, c.Param("targetId"))
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	utils.OK(c, status)
+}
+
+type developmentTransitionInput struct {
+	TargetID                 string `json:"targetId"`
+	ExpectedCurrentReleaseID string `json:"expectedCurrentReleaseId"`
+	Approve                  bool   `json:"approve"`
+}
+
+func readDevelopmentTransition(c *gin.Context) (developmentTransitionInput, bool) {
+	var in developmentTransitionInput
+	if c.ShouldBindJSON(&in) != nil {
+		utils.Fail(c, "参数错误")
+		return in, false
+	}
+	if !in.Approve {
+		utils.Fail(c, "请明确确认目标版本变更")
+		return in, false
+	}
+	if in.TargetID != "local-linux" || in.ExpectedCurrentReleaseID == "" {
+		utils.Fail(c, "请选择部署目标并重新读取当前版本")
+		return in, false
+	}
+	return in, true
+}
+
+func UpgradeDevelopmentRelease(c *gin.Context) {
+	scope, ok := engineeringRequestScope(c)
+	if !ok {
+		return
+	}
+	in, ok := readDevelopmentTransition(c)
+	if !ok {
+		return
+	}
+	result, err := service.UpgradeDevelopmentRelease(c.Request.Context(), scope, c.Param("releaseId"), in.TargetID, in.ExpectedCurrentReleaseID, in.Approve)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	utils.OK(c, developmentTransitionDTO(result))
+}
+
+func RollbackDevelopmentRelease(c *gin.Context) {
+	scope, ok := engineeringRequestScope(c)
+	if !ok {
+		return
+	}
+	in, ok := readDevelopmentTransition(c)
+	if !ok {
+		return
+	}
+	result, err := service.RollbackDevelopmentRelease(c.Request.Context(), scope, c.Param("releaseId"), in.TargetID, in.ExpectedCurrentReleaseID, in.Approve)
+	if err != nil {
+		utils.Fail(c, err.Error())
+		return
+	}
+	utils.OK(c, developmentTransitionDTO(result))
+}
+
+// Upgrade and recovery responses expose target metadata, not initialization credentials.
+func developmentTransitionDTO(result *service.DevelopmentDeploymentResult) gin.H {
+	return gin.H{"status": result.Status, "releaseId": result.ReleaseID, "targetId": result.TargetID, "url": result.URL}
+}
+
 func PreviewDevelopmentRelease(c *gin.Context) {
 	scope, ok := engineeringRequestScope(c)
 	if !ok {

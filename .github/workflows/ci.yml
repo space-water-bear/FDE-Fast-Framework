@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       docker_acceptance:
-        description: Run real isolated Linux first-delivery acceptance
+        description: Run real isolated Linux first and incremental delivery acceptance
         type: boolean
         default: false
 
@@ -68,3 +68,4 @@ jobs:
           cache-dependency-path: server/go.sum
       - run: go run ./cmd/fde prepare-image --output /tmp/fde-runner-image
       - run: FDE_RUN_DOCKER_ACCEPTANCE=1 go test ./internal/service -run '^TestDevelopmentDockerFirstDelivery$' -count=1 -v -timeout 35m
+      - run: FDE_RUN_DOCKER_INCREMENTAL_ACCEPTANCE=1 go test ./internal/service -run '^TestDevelopmentDockerIncrementalDelivery$' -count=1 -v -timeout 35m

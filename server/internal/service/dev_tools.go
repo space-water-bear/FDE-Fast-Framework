@@ -63,6 +63,9 @@ func (t *developmentTool) Call(ctx context.Context, args string) (any, error) {
 }
 
 func developmentSchema(properties map[string]any, required ...string) map[string]any {
+	if required == nil {
+		required = []string{}
+	}
 	return map[string]any{"type": "object", "properties": properties, "required": required, "additionalProperties": false}
 }
 func stringProperty(description string) map[string]any {
@@ -74,7 +77,7 @@ func DevelopmentAgentTools(run model.DevRun) []tool.Tool {
 		{name: "read_project_context", description: "读取本任务需求、项目基线、源码文件清单；需求为本次验收依据。", schema: developmentSchema(map[string]any{}), call: readDevelopmentContext},
 		{name: "read_file", description: "读取工作区源码片段与文件SHA256；不能读取配置凭证或运行数据。", schema: developmentSchema(map[string]any{"path": stringProperty("工作区相对文件路径"), "startLine": map[string]any{"type": "integer"}, "endLine": map[string]any{"type": "integer"}}, "path"), call: readDevelopmentFile},
 		{name: "search_code", description: "在工作区源码中查找文本，返回有限行与路径。", schema: developmentSchema(map[string]any{"query": stringProperty("需要搜索的字面文本")}, "query"), call: searchDevelopmentCode},
-		{name: "generate_business_code", description: "在本次已授权隔离任务工作区创建CRUD、表单Schema和安装资产；不会写工作台源码或运行数据库。字段类型string/text/int/float/bool/datetime，至少一个inForm字段。", schema: developmentSchema(map[string]any{"objectKey": stringProperty("可选：当前项目已保存的对象键"), "tableName": stringProperty("新业务表名，如biz_repair_ticket"), "business": stringProperty("业务名称"), "structName": stringProperty("可选Go类型名称"), "fields": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"name": stringProperty("snake_case列名"), "title": stringProperty("字段标题"), "type": map[string]any{"type": "string", "enum": []string{"string", "text", "int", "float", "bool", "datetime"}}, "required": map[string]any{"type": "boolean"}, "search": map[string]any{"type": "boolean"}, "inList": map[string]any{"type": "boolean"}, "inForm": map[string]any{"type": "boolean"}, "rules": map[string]any{"type": "object"}}, "required": []string{"name", "title", "type", "inForm"}}}}), call: generateDevelopmentBusiness},
+		{name: "generate_business_code", description: "在本次已授权隔离任务工作区创建CRUD、表单Schema和安装资产；不会写工作台源码或运行数据库。新模块直接生成，字段类型string/text/int/float/bool/datetime/enum。增量mode=update必须给objectKey、baseSpecVersion，fields仅为新增字段，枚举给rules.enum/default。", schema: developmentSchema(map[string]any{"objectKey": stringProperty("可选：当前项目已保存的对象键"), "tableName": stringProperty("新业务表名，如biz_repair_ticket"), "mode": map[string]any{"type": "string", "enum": []string{"create", "update"}}, "baseSpecVersion": map[string]any{"type": "integer", "minimum": 1}, "business": stringProperty("业务名称"), "structName": stringProperty("可选Go类型名称"), "fields": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"name": stringProperty("snake_case列名"), "title": stringProperty("字段标题"), "type": map[string]any{"type": "string", "enum": []string{"string", "text", "int", "float", "bool", "datetime", "enum"}}, "required": map[string]any{"type": "boolean"}, "search": map[string]any{"type": "boolean"}, "inList": map[string]any{"type": "boolean"}, "inForm": map[string]any{"type": "boolean"}, "rules": map[string]any{"type": "object"}}, "required": []string{"name", "title", "type", "inForm"}}}}), call: generateDevelopmentBusiness},
 		{name: "apply_patch", description: "按完整旧文件hash原子更新源码；新文件expectedHash=missing。禁止修改已有验收测试、配置/锁文件或运行数据。changes为path/expectedHash/content数组，修复时先read_file。", schema: developmentSchema(map[string]any{"changes": map[string]any{"type": "array", "items": map[string]any{"type": "object", "properties": map[string]any{"path": stringProperty("源码相对路径"), "expectedHash": stringProperty("read_file返回hash；新文件missing"), "content": stringProperty("文件完整新内容")}, "required": []string{"path", "expectedHash", "content"}}}}, "changes"), call: patchDevelopmentFiles},
 		{name: "run_checks", description: "执行固定Go测试/编译、前端类型/构建和Linux制品检查。返回真实步骤结果，失败后只修源码；成功仍由host复核。", schema: developmentSchema(map[string]any{}), call: func(ctx context.Context, run model.DevRun, _ string) (any, error) {
 			return RunDevelopmentChecks(ctx, run)
@@ -130,7 +133,7 @@ func readDevelopmentContext(_ context.Context, run model.DevRun, _ string) (any,
 	if len(files) > 300 {
 		files = files[:300]
 	}
-	return map[string]any{"requirement": run.Requirement, "projectId": run.ProjectID, "baseCommit": run.BaseCommit, "files": files, "conventions": "Go model/service/api/router + Vue API/page；新业务优先generate_business_code，再read_file+apply_patch修复。最终run_checks必须成功。不能删除或降低已有验收测试。"}, err
+	return map[string]any{"requirement": run.Requirement, "projectId": run.ProjectID, "baseCommit": run.BaseCommit, "files": files, "conventions": "基本字段新模块读本上下文后直接generate_business_code，不必通读框架/模板/安装器。只有自定义规则或失败修复才按需读业务文件。增量先读fde/assets/business.json，用mode=update和baseSpecVersion追加字段，保留自定义服务/页面。最终run_checks必须成功，不能删除或降低已有验收测试。"}, err
 }
 
 func readDevelopmentFile(_ context.Context, run model.DevRun, args string) (any, error) {
@@ -209,6 +212,21 @@ type developmentChange struct {
 }
 
 func applyDevelopmentChanges(run model.DevRun, changes []developmentChange) (any, error) {
+	return applyDevelopmentChangesWithOwnership(run, changes, nil)
+}
+
+func applyDevelopmentChangesWithOwnership(run model.DevRun, changes []developmentChange, generated map[string]developmentFileOwnership) (any, error) {
+	manifest, err := readDevelopmentOwnership(run.WorkspacePath)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateDevelopmentOwnership(run, manifest); err != nil {
+		return nil, err
+	}
+	baselineOwners, err := baselineDevelopmentOwnership(context.Background(), run)
+	if err != nil {
+		return nil, err
+	}
 	if len(changes) == 0 || len(changes) > 20 {
 		return nil, errors.New("一次最多更新20个文件")
 	}
@@ -222,13 +240,15 @@ func applyDevelopmentChanges(run model.DevRun, changes []developmentChange) (any
 		if err := allowedDevelopmentPath(change.Path, true); err != nil {
 			return nil, err
 		}
-		// P1 may edit files created in this task, never overwrite baseline framework/control code.
-		if run.WorkspaceBaseCommit != "" {
-			baseline := exec.Command("git", "-C", run.WorkspacePath, "cat-file", "-e", run.WorkspaceBaseCommit+":"+change.Path)
-			if baseline.Run() == nil {
-				return nil, fmt.Errorf("任务不能修改项目基线中的控制源码: %s", change.Path)
+		if change.Path == developmentOwnershipPath {
+			return nil, errors.New("文件所有权清单由宿主维护")
+		}
+		if developmentPathInBaseline(run, change.Path) {
+			if _, ok := baselineOwners.Files[change.Path]; !ok {
+				return nil, fmt.Errorf("任务不能修改未接管的项目基线文件: %s", change.Path)
 			}
 		}
+
 		if strings.HasSuffix(change.Path, ".go") {
 			formatted, err := format.Source([]byte(change.Content))
 			if err != nil {
@@ -277,6 +297,30 @@ func applyDevelopmentChanges(run model.DevRun, changes []developmentChange) (any
 		}
 		written = append(written, change.Path)
 	}
+	for _, change := range changes {
+		owner, ok := manifest.Files[change.Path]
+		if override, exists := generated[change.Path]; exists {
+			owner = override
+		} else if !ok {
+			owner = developmentFileOwnership{Kind: "custom"}
+		}
+		owner.CurrentHash = sha256Hex(change.Content)
+		manifest.Files[change.Path] = owner
+	}
+	if err := saveDevelopmentOwnership(run.WorkspacePath, manifest); err != nil {
+		for _, path := range written {
+			if old[path] == nil {
+				r, openErr := openCheckedRoot(run.WorkspacePath, path)
+				if openErr == nil {
+					_ = r.Remove(path)
+					r.Close()
+				}
+			} else {
+				_ = writeRootedFile(run.WorkspacePath, path, old[path])
+			}
+		}
+		return nil, err
+	}
 	return map[string]any{"written": written}, nil
 }
 func patchDevelopmentFiles(_ context.Context, run model.DevRun, args string) (any, error) {
@@ -300,15 +344,23 @@ type BusinessInstallationAssets struct {
 	Objects []BusinessInstallationAsset `json:"objects"`
 }
 
-func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args string) (any, error) {
+func generateDevelopmentBusiness(ctx context.Context, run model.DevRun, args string) (any, error) {
 	var input struct {
 		codegen.GenRequest
-		DryRun *bool `json:"dryRun"`
+		DryRun          *bool  `json:"dryRun"`
+		Mode            string `json:"mode"`
+		BaseSpecVersion int    `json:"baseSpecVersion"`
 	}
 	if err := json.Unmarshal([]byte(args), &input); err != nil {
 		return nil, err
 	}
 	req := input.GenRequest
+	if input.Mode == "update" {
+		return updateDevelopmentBusiness(ctx, run, req, input.BaseSpecVersion)
+	}
+	if input.Mode != "" && input.Mode != "create" {
+		return nil, errors.New("生成模式必须是create或update")
+	}
 	if req.ObjectKey != "" && len(req.Fields) == 0 {
 		obj, fields, err := GetBizObjectByKeyInProject(run.ProjectID, req.ObjectKey)
 		if err != nil {
@@ -330,8 +382,8 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 		}
 		req.Business = obj.Name
 		for _, field := range fields {
-			if field.Type == "enum" || field.Type == "relation" {
-				return nil, errors.New("当前首次交付仅支持基本字段；枚举/关联请使用后续增量能力")
+			if field.Type == "relation" {
+				return nil, errors.New("当前业务生成不支持关联字段")
 			}
 			var ui map[string]any
 			_ = json.Unmarshal([]byte(field.XUI), &ui)
@@ -359,6 +411,7 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 	}
 	changes := []developmentChange{}
 	paths := []string{}
+	owners := map[string]developmentFileOwnership{}
 	for _, file := range files {
 		path := file.Path
 		if !strings.HasPrefix(path, "web/") {
@@ -368,6 +421,11 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 			return nil, fmt.Errorf("模块文件已存在，请通过read_file/apply_patch修改: %s", path)
 		}
 		changes = append(changes, developmentChange{Path: path, ExpectedHash: "missing", Content: file.Content})
+		kind := "custom"
+		if strings.HasPrefix(path, "server/internal/model/") || strings.HasPrefix(path, "server/internal/router/") {
+			kind = "projection"
+		}
+		owners[path] = developmentFileOwnership{ObjectKey: d.ObjectKey, Kind: kind, TemplateHash: sha256Hex(file.Content)}
 		paths = append(paths, path)
 	}
 	var schema map[string]any
@@ -394,7 +452,7 @@ func generateDevelopmentBusiness(_ context.Context, run model.DevRun, args strin
 	changes = append(changes, developmentChange{Path: assetPath, ExpectedHash: expected, Content: string(assetJSON)})
 	specPath := "fde/spec/" + d.ObjectKey + ".json"
 	changes = append(changes, developmentChange{Path: specPath, ExpectedHash: "missing", Content: d.SchemaJSON})
-	if _, err := applyDevelopmentChanges(run, changes); err != nil {
+	if _, err := applyDevelopmentChangesWithOwnership(run, changes, owners); err != nil {
 		return nil, err
 	}
 	return map[string]any{"objectKey": d.ObjectKey, "files": paths, "assets": assetPath, "schema": schema, "written": true}, nil

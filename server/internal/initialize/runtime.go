@@ -101,6 +101,11 @@ func BootstrapRuntime(cfg *config.Config, configPath, assetsPath, manifestPath s
 		return err
 	}
 	cfg.DB.DSN = databasePath
+	maintenanceUnlock, err := lockRuntimeBootstrap(databasePath + ".maintenance")
+	if err != nil {
+		return err
+	}
+	defer maintenanceUnlock()
 	cfg.App.Mode = "release"
 	cfg.Runtime.ManifestPath, cfg.Runtime.ReleaseID, cfg.Runtime.SourceHash = manifestPath, pkg.ID, pkg.Manifest.SourceHash
 	journalPath := configPath + ".bootstrap.json"

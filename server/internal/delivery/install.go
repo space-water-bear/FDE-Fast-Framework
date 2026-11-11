@@ -193,11 +193,26 @@ func saveJournal(path string, j installJournal) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o600); err != nil {
+	if info, err := os.Lstat(path); err == nil && (!info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0) {
+		return errors.New("installation journal must be a regular file")
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".install-journal-")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(file.Name())
+	if _, err := file.Write(b); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 func ensureDirectory(root, rel string) error {
 	current := root

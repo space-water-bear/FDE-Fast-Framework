@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -15,7 +14,9 @@ import (
 
 	"fde-admin/internal/global"
 	"fde-admin/internal/model"
+	"fde-admin/internal/runner"
 	"fde-admin/internal/workspace"
+	"gorm.io/gorm/clause"
 )
 
 var projectKeyRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,47}$`)
@@ -37,6 +38,21 @@ func ListDevProjects(actorID uint) ([]model.DevProject, error) {
 	}
 	var list []model.DevProject
 	err := q.Order("id asc").Find(&list).Error
+	if err == nil {
+		for i := range list {
+			if list[i].WorkspacePath == "" || list[i].CurrentCommit != "" {
+				continue
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			_ = global.DB.Transaction(func(tx *gorm.DB) error {
+				if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&list[i], list[i].ID).Error; err != nil {
+					return err
+				}
+				return ensureDevelopmentProjectBaseline(ctx, tx, &list[i])
+			})
+			cancel()
+		}
+	}
 	return list, err
 }
 
@@ -75,7 +91,12 @@ func CreateDevProject(ctx context.Context, actorID uint, key, name string) (*mod
 	if err != nil {
 		return nil, err
 	}
-	project := &model.DevProject{Key: key, Name: name, OwnerID: actorID, SourceCommit: exported.SourceCommit, WorkspacePath: exported.Path}
+	hash, err := runner.SnapshotHash(exported.Path)
+	if err != nil {
+		_ = os.RemoveAll(exported.Path)
+		return nil, err
+	}
+	project := &model.DevProject{Key: key, Name: name, OwnerID: actorID, SourceCommit: exported.SourceCommit, WorkspacePath: exported.Path, CurrentCommit: exported.BaseCommit, BaselineHash: hash}
 	if err := global.DB.Create(project).Error; err != nil {
 		_ = os.RemoveAll(exported.Path)
 		return nil, err
@@ -105,16 +126,19 @@ func CreateDevRun(ctx context.Context, scope EngineeringScope, requirement strin
 	if project.WorkspacePath == "" {
 		return nil, errors.New("请先创建具有独立源码工作区的客户项目")
 	}
-	base, err := exec.CommandContext(ctx, "git", "-C", project.WorkspacePath, "rev-parse", "HEAD").Output()
-	if err != nil {
-		return nil, errors.New("项目源码基线不可用")
-	}
-	run := &model.DevRun{Key: uuid.NewString(), ProjectID: scope.ProjectID, ActorID: scope.ActorID, AgentID: selectedAgent.ID, Requirement: requirement, BaseCommit: strings.TrimSpace(string(base)), State: "queued", Phase: "plan"}
+	run := &model.DevRun{Key: uuid.NewString(), ProjectID: scope.ProjectID, ActorID: scope.ActorID, AgentID: selectedAgent.ID, Requirement: requirement, State: "queued", Phase: "plan"}
 	err = global.DB.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(project, scope.ProjectID).Error; err != nil {
+			return err
+		}
+		if err := ensureDevelopmentProjectBaseline(ctx, tx, project); err != nil {
+			return err
+		}
+		run.BaseCommit, run.BaseProjectRevision = project.CurrentCommit, project.BaselineRevision
 		if err := tx.Create(run).Error; err != nil {
 			return err
 		}
-		return tx.Create(&model.DevRunEvent{RunID: run.ID, Kind: "queued", Message: "需求已保存；等待开发执行器处理"}).Error
+		return tx.Create(&model.DevRunEvent{RunID: run.ID, Kind: "queued", Message: "需求与项目基线已保存，等待开发执行器处理"}).Error
 	})
 	return run, err
 }

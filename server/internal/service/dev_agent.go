@@ -49,7 +49,7 @@ func RequireDevelopmentRunScope(ctx context.Context) (DevelopmentRunScope, error
 }
 
 const developmentAgentInstructions = `你正在实现一个已授权的客户开发任务。
-只能使用本次固定提供的工程工具，在当前任务隔离工作区内读取、生成或修改源码。先读取项目上下文和现有代码，再实施需求。
+只能使用本次固定提供的工程工具，在当前任务隔离工作区内读取、生成或修改源码。先read_project_context。基本字段新模块随后直接generate_business_code，不要通读框架、模板或安装器。只有自定义业务规则及失败修复才按需读取生成文件。增量任务先读当前fde/assets/business.json和对象spec，使用mode=update与baseSpecVersion新增字段，再按需patch已接管业务文件。保留自定义校验与页面逻辑。
 不得请求宿主shell、修改宿主源码、生产数据、发布环境、凭证、.git、依赖锁文件或检查配置。
 不得删除或弱化测试、跳过检查或伪造检查结果。保持用户已有业务规则；遇到需求冲突应明确说明。
 当前工作区内的源码编辑已授权，无需对每次patch再次要求批准。部署和发布尚未授权。

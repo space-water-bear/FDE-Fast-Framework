@@ -7,7 +7,7 @@ const source = await readFile(new URL('../src/views/system/development/state.ts'
 const { outputText } = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2020 },
 })
-const { runLabel, canCancelRun, canBuildRelease, canUseRelease, isRunPending, mergeRunEvents,
+const { canPromoteRun, canUpgradeTarget, canRollbackTarget, targetStatusLabel, runLabel, canCancelRun, canBuildRelease, canUseRelease, isRunPending, mergeRunEvents,
   readCheckReport, prettyReport, readSavedSelection, safeHttpUrl, isDeployedResult, validateProject, validateRun } =
   await import('data:text/javascript;base64,' + Buffer.from(outputText).toString('base64'))
 
@@ -118,4 +118,72 @@ test('project/task inputs obey server naming and UTF-8 requirement limits', () =
   assert.match(validateRun('  ', 1), /需求/)
   assert.equal(validateRun('中'.repeat(10666), 1), '')
   assert.match(validateRun('中'.repeat(10667), 1), /过长/)
+})
+
+
+test('promotion requires the reviewed run and the exact current project baseline', () => {
+  const project = { currentCommit: 'base-a', baselineRevision: 2 }
+  const run = { state: 'succeeded', sourceHash: 'source-a', cancelRequested: false,
+    baseCommit: 'base-a', baseProjectRevision: 2, promotedCommit: '' }
+  const checks = { success: true, snapshotHash: 'source-a' }
+  assert.equal(canPromoteRun(run, checks, project), true)
+  assert.equal(canPromoteRun({ ...run, promotedCommit: 'promoted' }, checks, project), false)
+  assert.equal(canPromoteRun({ ...run, state: 'running' }, checks, project), false)
+  assert.equal(canPromoteRun(run, { ...checks, snapshotHash: 'old' }, project), false)
+  assert.equal(canPromoteRun(run, checks, { ...project, currentCommit: 'new-base' }), false)
+  assert.equal(canPromoteRun(run, checks, { ...project, baselineRevision: 3 }), false)
+  assert.equal(canPromoteRun(run, checks, undefined), false)
+  assert.equal(canPromoteRun({ ...run, baseProjectRevision: 0 }, checks, { ...project, baselineRevision: 0 }), true)
+})
+
+test('upgrade and rollback use observed target versions and refuse in-flight state', () => {
+  const release = { id: 'v2', status: 'ready', artifactHash: 'hash-v2' }
+  const deployed = { targetId: 'local-linux', status: 'deployed', currentReleaseId: 'v1', previousReleaseId: '', backupAvailable: false, operationActive: false }
+  assert.equal(canUpgradeTarget(release, deployed), true)
+  assert.equal(canUpgradeTarget({ ...release, id: 'v1' }, deployed), false)
+  assert.equal(canUpgradeTarget({ ...release, artifactHash: '' }, deployed), false)
+  assert.equal(canUpgradeTarget(release, { ...deployed, status: 'upgrading', operationActive: true }), false)
+  assert.equal(canUpgradeTarget(release, { ...deployed, currentReleaseId: '' }), false)
+  const recoverable = { ...deployed, currentReleaseId: 'v2', previousReleaseId: 'v1', backupAvailable: true }
+  assert.equal(canUpgradeTarget(release, { ...recoverable, status: 'upgrade_failed', backupAvailable: false }), true)
+  assert.equal(canUpgradeTarget({ ...release, id: 'v3' }, { ...recoverable, status: 'upgrade_failed' }), false)
+  for (const status of ['deployed', 'upgrade_failed', 'rolling_back', 'rollback_failed']) assert.equal(canRollbackTarget({ ...recoverable, status }), true)
+  for (const status of ['empty', 'upgrading']) assert.equal(canRollbackTarget({ ...recoverable, status }), false)
+  assert.equal(canRollbackTarget({ ...recoverable, backupAvailable: false }), false)
+  assert.equal(canRollbackTarget({ ...recoverable, previousReleaseId: '' }), false)
+  assert.equal(canRollbackTarget(null), false)
+  assert.equal(canRollbackTarget({ ...recoverable, status: 'rolling_back', operationActive: true }), false)
+  assert.equal(canUpgradeTarget(release, { ...recoverable, status: 'upgrading', operationActive: false }), true)
+  assert.equal(canUpgradeTarget(release, { ...recoverable, status: 'upgrading', operationActive: true }), false)
+  assert.equal(targetStatusLabel('upgrade_failed'), '升级失败，等待恢复')
+  assert.equal(targetStatusLabel('unknown'), '状态待确认')
+  assert.equal(targetStatusLabel('upgrading', false), '升级中断，等待继续')
+  assert.equal(targetStatusLabel('rolling_back', false), '回退中断，等待恢复')
+})
+
+
+test('P2 API calls bind explicit approval, actor project scope and the observed current release', async () => {
+  const source = await readFile(new URL('../src/api/development.ts', import.meta.url), 'utf8')
+  const isolated = source.replace("import request from '@/utils/request'", `const request = {
+    get: async (url, options) => ({ url, options }),
+    post: async (url, body, options) => ({ url, body, options }),
+  }`).replace("import { releaseDownloadName } from '@/utils/download'", '')
+  const compiled = ts.transpileModule(isolated, { compilerOptions: { module: ts.ModuleKind.ESNext } }).outputText
+  const api = await import('data:text/javascript;base64,' + Buffer.from(compiled).toString('base64'))
+  const promotion = await api.promoteDevRun(7, 'checked-run')
+  assert.equal(promotion.url, '/dev/runs/checked-run/promote')
+  assert.deepEqual(promotion.body, { approve: true })
+  assert.equal(promotion.options.params.projectId, 7)
+  const upgrade = await api.upgradeDevRelease(7, 'v2', 'local-linux', 'v1')
+  assert.equal(upgrade.url, '/dev/releases/v2/upgrade')
+  assert.deepEqual(upgrade.body, { targetId: 'local-linux', expectedCurrentReleaseId: 'v1', approve: true })
+  assert.equal(upgrade.options.params.projectId, 7)
+  assert.equal(upgrade.options.timeout, 360_000)
+  const rollback = await api.rollbackDevRelease(7, 'v2', 'local-linux', 'v2')
+  assert.equal(rollback.url, '/dev/releases/v2/rollback')
+  assert.equal(rollback.options.timeout, 360_000)
+  assert.deepEqual(rollback.body, { targetId: 'local-linux', expectedCurrentReleaseId: 'v2', approve: true })
+  const target = await api.getDevTarget(7, 'local-linux')
+  assert.equal(target.url, '/dev/targets/local-linux')
+  assert.equal(target.options.params.projectId, 7)
 })

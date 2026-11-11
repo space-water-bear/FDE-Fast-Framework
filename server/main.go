@@ -29,7 +29,7 @@ func main() {
 func run() error {
 	args := os.Args[1:]
 	command := "workbench"
-	if len(args) > 0 && (args[0] == "bootstrap" || args[0] == "verify" || args[0] == "serve" || args[0] == "workbench") {
+	if len(args) > 0 && (args[0] == "bootstrap" || args[0] == "verify" || args[0] == "serve" || args[0] == "workbench" || args[0] == "upgrade" || args[0] == "rollback") {
 		command = args[0]
 		args = args[1:]
 	}
@@ -37,6 +37,7 @@ func run() error {
 	configPath := flags.String("config", "config.yaml", "configuration file")
 	assets := flags.String("assets", "", "frozen initialization assets")
 	manifest := flags.String("manifest", "", "verified release manifest")
+	fromManifest := flags.String("from-manifest", "", "verified previous release manifest")
 	web := flags.String("web", "", "built frontend directory")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -51,6 +52,19 @@ func run() error {
 	cfg.Runtime.ManifestPath = *manifest
 	cfg.Runtime.WebDir = *web
 	switch command {
+	case "upgrade", "rollback":
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		var result initialize.RuntimeUpgradeResult
+		if command == "upgrade" {
+			result, err = initialize.UpgradeRuntime(ctx, cfg, *configPath, *fromManifest, *manifest)
+		} else {
+			result, err = initialize.RollbackRuntime(ctx, cfg, *configPath, *fromManifest, *manifest)
+		}
+		if encodeErr := json.NewEncoder(os.Stdout).Encode(result); encodeErr != nil {
+			return errors.Join(err, encodeErr)
+		}
+		return err
 	case "bootstrap":
 		if *assets == "" {
 			return fmt.Errorf("bootstrap requires --assets")
@@ -69,6 +83,11 @@ func run() error {
 	defer stop()
 	if command == "serve" {
 		cfg.App.Mode = "release"
+		unlock, err := initialize.LockRuntimeServing(cfg)
+		if err != nil {
+			return err
+		}
+		defer unlock()
 		if err := initialize.VerifyRuntime(cfg, *manifest); err != nil {
 			return err
 		}

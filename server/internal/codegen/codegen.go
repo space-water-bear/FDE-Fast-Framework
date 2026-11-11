@@ -22,6 +22,7 @@ var FieldTypes = map[string]FieldType{
 	"float":    {GoType: "float64", TsType: "number", GormTag: "default:0", FormControl: "number", Searchable: true},
 	"bool":     {GoType: "bool", TsType: "boolean", GormTag: "default:false", FormControl: "switch"},
 	"datetime": {GoType: "time.Time", TsType: "string", GormTag: "type:datetime", FormControl: "datetime"},
+	"enum":     {GoType: "string", TsType: "string", GormTag: "size:128", FormControl: "select", Searchable: true},
 }
 
 type FieldType struct {
@@ -158,6 +159,22 @@ func Prepare(req GenRequest) (*Data, error) {
 		if !ok {
 			return nil, fmt.Errorf("不支持的字段类型: %s (可选 string/text/int/float/bool/datetime)", f.Type)
 		}
+		if f.Type == "enum" {
+			values, err := enumValues(f.Rules["enum"])
+			if err != nil {
+				return nil, fmt.Errorf("枚举字段 %s: %w", f.Name, err)
+			}
+			if value, exists := f.Rules["default"]; exists {
+				text, ok := value.(string)
+				if !ok || !values[text] {
+					return nil, fmt.Errorf("枚举字段 %s 默认值不属于选项", f.Name)
+				}
+				if strings.ContainsAny(text, ";\\\"`\r\n") {
+					return nil, errors.New("生成枚举默认值不能包含结构体标签分隔符")
+				}
+				ft.GormTag += ";default:" + text
+			}
+		}
 		if f.Search && !ft.Searchable {
 			return nil, errors.New("字段 " + f.Name + " 的类型不支持作为查询条件(仅 string/text/int/float 支持)")
 		}
@@ -185,6 +202,13 @@ func Prepare(req GenRequest) (*Data, error) {
 			d.HasTime = true
 		default:
 			fd.TsDefault = "''"
+		}
+		if value, ok := f.Rules["default"]; ok {
+			encoded, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			fd.TsDefault = string(encoded)
 		}
 		if f.Search {
 			switch ft.GoType {
@@ -225,7 +249,7 @@ func Prepare(req GenRequest) (*Data, error) {
 		case "bool":
 			kind = "boolean"
 		}
-		field := map[string]any{"type": kind, "title": f.Title, "required": f.Required, "x-ui": map[string]any{"control": fd.FormControl}, "x-fde": map[string]any{"type": f.Type, "sort": i, "inForm": f.InForm, "inList": f.InList, "column": f.Name}}
+		field := map[string]any{"type": kind, "title": f.Title, "required": f.Required, "x-ui": map[string]any{"control": fd.FormControl}, "x-fde": map[string]any{"type": f.Type, "sort": i, "inForm": f.InForm, "inList": f.InList, "searchable": f.Search, "column": f.Name}}
 		for _, key := range []string{"minLength", "maxLength", "minimum", "maximum", "pattern", "enum", "default"} {
 			if value, ok := f.Rules[key]; ok {
 				field[key] = value
@@ -244,6 +268,33 @@ func Prepare(req GenRequest) (*Data, error) {
 	d.SchemaJSON = string(raw)
 	d.SchemaLiteral = strconv.Quote(string(raw))
 	return d, nil
+}
+
+func enumValues(raw any) (map[string]bool, error) {
+	values := map[string]bool{}
+	switch options := raw.(type) {
+	case []string:
+		for _, option := range options {
+			if option == "" || values[option] {
+				return nil, errors.New("枚举选项不能为空或重复")
+			}
+			values[option] = true
+		}
+	case []any:
+		for _, option := range options {
+			text, ok := option.(string)
+			if !ok || text == "" || values[text] {
+				return nil, errors.New("枚举选项必须是不同的非空字符串")
+			}
+			values[text] = true
+		}
+	default:
+		return nil, errors.New("必须提供字符串枚举选项")
+	}
+	if len(values) == 0 || len(values) > 100 {
+		return nil, errors.New("枚举选项数量必须在1到100之间")
+	}
+	return values, nil
 }
 
 func stripTablePrefix(s string) string {

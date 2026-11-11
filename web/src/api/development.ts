@@ -7,6 +7,10 @@ export interface DevProject {
   name: string
   ownerId: number
   sourceCommit: string
+  currentCommit: string
+  baselineHash: string
+  baselineRevision: number
+  lastPromotedRunId: number
   createdAt: string
 }
 
@@ -18,6 +22,9 @@ export interface DevRun {
   agentId: number
   requirement: string
   baseCommit: string
+  baseProjectRevision?: number
+  promotedCommit?: string
+  promotedAt?: string | null
   workspaceBaseCommit?: string
   state: string
   phase: string
@@ -73,6 +80,16 @@ export interface DevTarget {
   kind: string
 }
 
+export interface DevTargetStatus {
+  targetId: string
+  status: string
+  currentReleaseId: string
+  previousReleaseId: string
+  url: string
+  backupAvailable: boolean
+  operationActive: boolean
+}
+
 export interface DevDeployment {
   status: string
   releaseId: string
@@ -115,6 +132,11 @@ export function getDevRun(projectId: number, key: string) {
   return request.get<any, DevRunDetail>('/dev/runs/' + encodeURIComponent(key), scope(projectId))
 }
 
+export function promoteDevRun(projectId: number, key: string) {
+  return request.post<any, DevProject>('/dev/runs/' + encodeURIComponent(key) + '/promote',
+    { approve: true }, { ...scope(projectId), timeout: 120_000 })
+}
+
 export function cancelDevRun(projectId: number, key: string) {
   return request.post<any, null>('/dev/runs/' + encodeURIComponent(key) + '/cancel', {}, scope(projectId))
 }
@@ -133,6 +155,20 @@ export function previewDevRelease(projectId: number, releaseId: string) {
 
 export function listDevTargets(projectId: number) {
   return request.get<any, { list: DevTarget[] }>('/dev/targets', scope(projectId))
+}
+
+export function getDevTarget(projectId: number, targetId: string) {
+  return request.get<any, DevTargetStatus>('/dev/targets/' + encodeURIComponent(targetId), scope(projectId))
+}
+
+export function upgradeDevRelease(projectId: number, releaseId: string, targetId: string, expectedCurrentReleaseId: string) {
+  return request.post<any, DevDeployment>('/dev/releases/' + encodeURIComponent(releaseId) + '/upgrade',
+    { targetId, expectedCurrentReleaseId, approve: true }, { ...scope(projectId), timeout: 360_000 })
+}
+
+export function rollbackDevRelease(projectId: number, releaseId: string, targetId: string, expectedCurrentReleaseId: string) {
+  return request.post<any, DevDeployment>('/dev/releases/' + encodeURIComponent(releaseId) + '/rollback',
+    { targetId, expectedCurrentReleaseId, approve: true }, { ...scope(projectId), timeout: 360_000 })
 }
 
 export function deployDevRelease(projectId: number, releaseId: string, targetId: string) {
